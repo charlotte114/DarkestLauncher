@@ -1,5 +1,6 @@
 package moe.ddlauncher.ui
 
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -78,6 +79,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -105,6 +107,7 @@ fun ModsApp(
     onDelete: (ModInfo) -> Unit,
     onImport: (List<Uri>) -> Unit,
     onImportPack: (Uri) -> Unit,
+    onCheckPack: () -> Unit,
     onRemovePack: () -> Unit,
     onOpenWorkshop: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -217,7 +220,16 @@ fun ModsApp(
             }
 
             if (!state.packInstalled) {
-                item { DataPackMissingCard(onPick = { packPicker.launch(arrayOf("application/vnd.android.package-archive", "application/zip", "application/octet-stream", "*/*")) }) }
+                item {
+                    DataPackMissingCard(
+                        onPick = {
+                            packPicker.launch(
+                                arrayOf("application/vnd.android.package-archive", "application/zip", "application/octet-stream", "*/*")
+                            )
+                        },
+                        onCheck = onCheckPack,
+                    )
+                }
             }
 
             item {
@@ -481,7 +493,8 @@ private fun GameCard(
 }
 
 @Composable
-private fun DataPackMissingCard(onPick: () -> Unit) {
+private fun DataPackMissingCard(onPick: () -> Unit, onCheck: () -> Unit) {
+    val ctx = LocalContext.current
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
         Column(Modifier.padding(16.dp)) {
             Text(
@@ -503,8 +516,34 @@ private fun DataPackMissingCard(onPick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
             )
             Spacer(Modifier.height(12.dp))
-            Button(onClick = onPick) { Text("导入数据包") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onPick, modifier = Modifier.weight(1f)) {
+                    Text("导入数据包")
+                }
+                OutlinedButton(onClick = onCheck, modifier = Modifier.weight(1f)) {
+                    Text("检查数据包")
+                }
+                OutlinedButton(
+                    onClick = { openDataPackDownload(ctx) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("下载数据包")
+                }
+            }
         }
+    }
+}
+
+/** 浏览器打开游戏 APK 下载页 */
+private const val DATA_PACK_DOWNLOAD_URL =
+    "https://dl.apkvision.org/darkest-dungeon/Darkest-Dungeon-v2.2.2-APKVISION.apk?v=0b84730f228f4308"
+
+private fun openDataPackDownload(ctx: android.content.Context) {
+    runCatching {
+        ctx.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(DATA_PACK_DOWNLOAD_URL))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
     }
 }
 

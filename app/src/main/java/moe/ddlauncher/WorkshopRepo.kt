@@ -371,6 +371,59 @@ object WorkshopRepo {
     data class SubscriptionPage(val items: List<Item>, val total: Int)
 
     /**
+     * 匿名走 CM 协议搜工坊（`PublishedFile.QueryFiles#1`）——不登录、不填 Key。
+     *
+     * 和 [searchViaCm] 的区别只在连接：这里用 connectAnonymous（Steam 允许匿名 game server
+     * 会话连 CM 查公开条目），而不是 refresh token 登录。这样绕开被墙的 steamcommunity.com
+     * 网页，复用下载 mod 本来就在用的 CM 节点。公开条目可查，私密/年龄锁条目仍看不到。
+     */
+    suspend fun searchAnonymousViaCm(
+        text: String,
+        page: Int,
+        sort: WorkshopCatalog.Sort,
+        queryTypeOverride: Int? = null,
+        days: Int = 0,
+    ): SubscriptionPage = withContext(Dispatchers.IO) {
+        val queryType = queryTypeOverride ?: sort.queryTypeFor(text)
+        val cmServers = top.apricityx.workshop.steam.protocol.SteamDirectoryClient(client).loadServers()
+        top.apricityx.workshop.steam.protocol.OkHttpSteamCmSession(client).use { session ->
+            session.connectAnonymous(cmServers)
+            val resp = session.callServiceMethod(
+                methodName = "PublishedFile.QueryFiles#1",
+                request = top.apricityx.workshop.steam.proto.CPublishedFile_QueryFiles_Request.newBuilder()
+                    .setQueryType(queryType)
+                    .setPage(page)
+                    .setNumperpage(PAGE_SIZE)
+                    .setAppid(APP_ID.toInt())
+                    .setSearchText(text)
+                    .setLanguage(top.apricityx.workshop.steam.protocol.STEAM_LANGUAGE_SIMPLIFIED_CHINESE)
+                    .apply { if (days > 0) setDays(days) }
+                    .setReturnDetails(true)
+                    .setReturnShortDescription(true)
+                    .setStripDescriptionBbcode(true)
+                    .build(),
+                parser = top.apricityx.workshop.steam.proto.CPublishedFile_QueryFiles_Response.parser(),
+            )
+            val items = resp.publishedfiledetailsList.mapNotNull { d ->
+                d.publishedfileid.takeIf { it > 0L }?.let { id ->
+                    Item(
+                        id = id,
+                        title = d.title.ifBlank { "未命名" },
+                        sizeBytes = d.fileSize,
+                        updated = d.timeUpdated.toLong(),
+                        subscriptions = d.subscriptions.toLong(),
+                        previewUrl = d.previewUrl,
+                        description = d.shortDescription.ifBlank { d.fileDescription },
+                        creator = d.creator.toString(),
+                        tags = emptyList(),
+                    )
+                }
+            }
+            SubscriptionPage(items, if (resp.total > 0) resp.total else items.size)
+        }
+    }
+
+    /**
      * 走 CM 协议读「我的订阅」（`PublishedFile.GetUserFiles#1`）。
      *
      * 为什么不用 Web API：`IPublishedFileService/GetUserFiles` 只认 API key，

@@ -22,7 +22,7 @@ import kotlinx.coroutines.withTimeout
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
-        const val LAUNCHER_VERSION = "1.0"
+        const val LAUNCHER_VERSION = "1.1"
     }
 
     data class Ui(
@@ -148,6 +148,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(packProgress = null) }
             note("数据包：${result.message}")
             refresh()
+        }
+    }
+
+    /** 扫 Download 目录找数据包，找到就自动导入；找不到提示去下载 */
+    fun checkAndImportDataPack() {
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            _state.update { it.copy(busy = "正在检查 Download 目录…") }
+            val found = withContext(Dispatchers.IO) { DataPack.findInDownloads() }
+            if (found == null) {
+                _state.update { it.copy(busy = null) }
+                note("数据包检查：Download 目录里没找到可导入的安装包，先点「下载数据包」")
+                return@launch
+            }
+            note("数据包检查：找到 ${found.name}，开始导入")
+            _state.update { it.copy(busy = null) }
+            importDataPack(android.net.Uri.fromFile(found))
         }
     }
 
@@ -903,16 +920,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 有 key 或已登录时搜索整个工坊（内置目录只收了 670 个热门条目） */
+    /** 搜索整个工坊：公开条目匿名可搜（爬社区网页），登录/API Key 只作为更快的备用链路 */
     fun wsSearchOnline(append: Boolean = false) {
         val key = _ws.value.apiKey.trim()
         val account = SteamAuth.load(getApplication())
-        if (key.isEmpty() && account == null) {
-            _ws.update {
-                it.copy(error = "工坊内容需要登录 Steam（或填 API Key）才能读取")
-            }
-            return
-        }
         val text = _ws.value.query.trim()
         val sort = _ws.value.sort
         val page = if (append) _ws.value.onlinePage + 1 else 1
@@ -931,8 +942,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 days = if (sort.supportsTimeWindow) _ws.value.timeWindow.days else 0,
                             )
                         }
-                    else -> WorkshopRepo.queryFiles(key, text, page, sort)
+                    key.isNotEmpty() -> WorkshopRepo.queryFiles(key, text, page, sort)
                         .let { WorkshopRepo.SubscriptionPage(it, it.size) }
+                    // 匿名：先用 CM（下载 mod 本来就在用的节点，不需要网页）；CM 不行再退回爬网页
+                    else -> runCatching {
+                        retryIo(times = 2) {
+                            WorkshopRepo.searchAnonymousViaCm(
+                                text, page, sort,
+                                days = if (sort.supportsTimeWindow) _ws.value.timeWindow.days else 0,
+                            )
+                        }
+                    }.recoverCatching { cmErr ->
+                        DdLog.i(ctx, "search", "匿名 CM 失败，退回网页抓取：${cmErr.message}")
+                        WorkshopBrowseRepo.search(
+                            text, page, sort,
+                            days = if (sort.supportsTimeWindow) _ws.value.timeWindow.days else 0,
+                        ).let { WorkshopRepo.SubscriptionPage(it.items, it.total) }
+                    }.getOrThrow()
                 }
             }
             res.onSuccess { result ->
@@ -986,7 +1012,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     key.isNotEmpty() -> WorkshopRepo.queryFiles(key, text, 1, _ws.value.sort)
                         .let { WorkshopRepo.SubscriptionPage(it, it.size) }
-                    else -> throw IllegalStateException("没登录也没有 API Key")
+                    else -> runCatching {
+                        retryIo(times = 2) {
+                            WorkshopRepo.searchAnonymousViaCm(text, 1, _ws.value.sort, queryTypeOverride = queryType)
+                        }
+                    }.recoverCatching {
+                        WorkshopBrowseRepo.search(text, 1, _ws.value.sort, days = 0)
+                            .let { WorkshopRepo.SubscriptionPage(it.items, it.total) }
+                    }.getOrThrow()
                 }
             }.onSuccess { page ->
                 DdLog.i(ctx, "search", "OK ${System.currentTimeMillis() - started}ms items=${page.items.size} total=${page.total}")

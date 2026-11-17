@@ -2,6 +2,7 @@ package moe.ddlauncher
 
 import android.content.Context
 import android.net.Uri
+import android.os.Environment
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
@@ -51,6 +52,42 @@ object DataPack {
     data class Progress(val bytes: Long, val entries: Int, val current: String)
 
     data class Result(val ok: Boolean, val message: String)
+
+    /**
+     * 在 Download（含一层子目录）里找一个可导入的数据包。
+     * 不解压、只查 zip 中央目录里有没有 assets/nx/exefs/main，所以几 GB 的包也是秒级。
+     * 命中后返回 File，交给 install() 走正常导入流程。
+     */
+    fun findInDownloads(): File? {
+        val dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            ?: return null
+        if (!dl.isDirectory) return null
+        // 顶层 + 一层子目录，按修改时间倒序（刚下的排前面）
+        val files = ArrayList<File>()
+        dl.listFiles()?.forEach { f ->
+            if (f.isFile) files.add(f)
+            else if (f.isDirectory) f.listFiles()?.filter { it.isFile }?.let { files.addAll(it) }
+        }
+        files.sortByDescending { it.lastModified() }
+        for (f in files) {
+            val name = f.name.lowercase(Locale.ROOT)
+            if (!name.endsWith(".apk") && !name.endsWith(".zip")) continue
+            if (f.length() < 64L * 1024 * 1024) continue // 数据包至少几十 MB，跳过小文件
+            if (looksLikeDataPack(f)) return f
+        }
+        return null
+    }
+
+    /** 只读 zip 中央目录，看是否含游戏数据的标记文件 */
+    private fun looksLikeDataPack(file: File): Boolean {
+        return try {
+            java.util.zip.ZipFile(file).use { zip ->
+                zip.getEntry("${PREFIX}${MARKER}") != null
+            }
+        } catch (t: Throwable) {
+            false
+        }
+    }
 
     /**
      * 从用户选的 APK / zip 里流式抽出 assets/nx 下的内容。

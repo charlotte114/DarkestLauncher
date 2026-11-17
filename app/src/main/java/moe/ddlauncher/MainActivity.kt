@@ -142,6 +142,7 @@ class MainActivity : ComponentActivity() {
                         onDelete = { vm.delete(it) },
                         onImport = { vm.importZips(it) },
                         onImportPack = { uri -> vm.importDataPack(uri) },
+                        onCheckPack = { vm.checkAndImportDataPack() },
                         onRemovePack = { vm.removeDataPack() },
                         onOpenWorkshop = { showWorkshop = true },
                         onOpenSettings = { showSettings = true },

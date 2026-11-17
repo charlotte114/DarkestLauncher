@@ -10,21 +10,27 @@
 
 整体配色取自初音未来的蓝绿系（`#39C5BB` / `#00A0B8`），界面里不出现红色。
 
+- [使用教程](USAGE.md) —— 从安装、导入数据包到下载 mod 的完整步骤
+- [更新日志](CHANGELOG.md) —— 各版本改动
+
 ## 功能
 
-- **创意工坊**：直连 Steam CM，支持搜索 / 排序（热门、最新、更新、订阅数）/ 时间范围 / 分页，
-  下载后自动解包到 `Android/media/com.darkestdungeon/mods/`，支持订阅、检查更新、一键全更
-- **mod 管理**：开关（改 `project.xml` 后缀）、单条详情、覆盖冲突提示、一键全开 / 全关、批量导入 zip
-- **存档**：快照备份、还原、删除、导入 zip、导出到 `Documents/DarkestSaves/`
+- **创意工坊**：直连 Steam CM，**公开条目免登录 / 免 API Key 即可搜索下载**；支持搜索 /
+  排序（热门、最新、更新、订阅数）/ 时间范围 / 分页，下载后自动解包到
+  `Android/media/com.darkestdungeon/mods/`，支持订阅、检查更新、一键全更
+- **mod 管理**：开关（改 `project.xml` 后缀）、单条详情、覆盖冲突提示、一键全开 / 全关、
+  批量导入 zip（一个包里的多个 mod 会逐个识别）
+- **存档**：快照备份、还原、删除、导入 zip、导出（默认 `Download/DarkestSaves/`，或自选目录）
 - **游戏内设置**：直接改 `persist.options.json` —— 分辨率、帧率、模糊、Gamma、五路音量、语言、
   字幕、玩法开关；写入前自动备份，可一键还原
-- **其它**：Steam 账号登录、运行日志（启动器 + 游戏）、数据包导入 / 删除、免重启刷新
+- **其它**：Steam 账号登录、运行日志（启动器 + 游戏）、数据包导入 / 删除 / 自动检查 / 下载入口、
+  免重启刷新
 
 ## 包名说明
 
 `applicationId` 是 `com.darkestdungeon.launcher`，可以和原版游戏同时安装、互不覆盖。
 `versionName` 保持 `2.2.1`，与内置的游戏运行时一致，避免第三方工具误判版本。
-启动器自己的版本看设置页：**1.0**。
+启动器自己的版本看设置页：**1.1**。
 
 数据目录随包名走：`/sdcard/Android/data/com.darkestdungeon.launcher/`、`/sdcard/Android/media/com.darkestdungeon.launcher/mods/`，
 与原版游戏完全独立，第一次使用需要重新导入数据包和 mod。
