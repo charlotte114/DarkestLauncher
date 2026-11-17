@@ -268,7 +268,7 @@ fun SettingsScreen(
                         if (About.REPO.isNotBlank()) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    "源码：",
+                                    "GitHub：",
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                                 TextButton(
@@ -276,8 +276,8 @@ fun SettingsScreen(
                                     contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
                                 ) {
                                     Text(
-                                        About.REPO_NAME.ifBlank { About.REPO },
-                                        style = MaterialTheme.typography.bodySmall,
+                                        About.REPO,
+                                        style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
                                     )
                                 }

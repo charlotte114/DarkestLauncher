@@ -16,9 +16,6 @@ object About {
     /** 源码仓库：设置页里显示成一行可点的链接 */
     const val REPO = "https://github.com/charlotte114/DarkestLauncher"
 
-    /** 仓库在界面上显示的名字 */
-    const val REPO_NAME = "charlotte114/DarkestLauncher"
-
     /** 一句话简介 / 联系方式，可留空 */
     const val NOTE = ""
 
