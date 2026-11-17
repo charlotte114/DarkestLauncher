@@ -43,6 +43,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         /** 存档快照列表（新的在前） */
         val snapshots: List<SaveRepo.Snapshot> = emptyList(),
         val saveBusy: Boolean = false,
+        /** 导出存档的结果，显示在存档面板里 */
+        val saveNote: String? = null,
         /** 看日志用的文本，非空就弹日志框 */
         val logText: String? = null,
         val logBusy: Boolean = false,
@@ -302,6 +304,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /** 导出某份存档：treeUri 为 null 时导出到 Download/DarkestSaves/ */
+    fun exportSave(id: String, treeUri: Uri?) {
+        val snap = _state.value.snapshots.firstOrNull { it.id == id } ?: return
+        if (_state.value.saveBusy) return
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            _state.update { it.copy(saveBusy = true, saveNote = null) }
+            val r = withContext(Dispatchers.IO) { runCatching { SaveRepo.exportTo(ctx, snap, treeUri) } }
+            _state.update {
+                it.copy(
+                    saveBusy = false,
+                    saveNote = r.fold(
+                        onSuccess = { path -> "已导出到 $path" },
+                        onFailure = { e -> "导出失败：${e.message ?: e.javaClass.simpleName}" },
+                    ),
+                )
+            }
+            r.onSuccess { DdLog.i(ctx, "save", "export ok $id -> $it") }
+                .onFailure { DdLog.e(ctx, "save", it) }
+        }
+    }
+
+    fun clearSaveNote() = _state.update { it.copy(saveNote = null) }
 
     fun deleteSave(id: String) {
         val snap = _state.value.snapshots.firstOrNull { it.id == id } ?: return

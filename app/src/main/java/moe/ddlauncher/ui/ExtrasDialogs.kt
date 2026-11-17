@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -50,6 +51,9 @@ fun SaveDialog(
     onImportSave: () -> Unit,
     onRestore: (String) -> Unit,
     onDelete: (String) -> Unit,
+    onExport: (String) -> Unit,
+    onExportDefault: (String) -> Unit,
+    exportNote: String?,
     onDismiss: () -> Unit,
 ) {
     var pendingRestore by remember { mutableStateOf<SaveRepo.Snapshot?>(null) }
@@ -98,6 +102,27 @@ fun SaveDialog(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { snapshots.firstOrNull()?.let { onExportDefault(it.id) } },
+                        enabled = !busy && snapshots.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                    ) { Text("最新备份导出到 Download", style = MaterialTheme.typography.labelMedium) }
+                    OutlinedButton(
+                        onClick = { snapshots.firstOrNull()?.let { onExport(it.id) } },
+                        enabled = !busy && snapshots.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                    ) { Text("选文件夹导出", style = MaterialTheme.typography.labelMedium) }
+                }
+                if (!exportNote.isNullOrBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        exportNote,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
                 Spacer(Modifier.height(12.dp))
                 if (snapshots.isEmpty()) {
                     Text(
@@ -119,11 +144,23 @@ fun SaveDialog(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
-                                    TextButton(onClick = { pendingRestore = s }, enabled = !busy) {
-                                        Text("还原")
-                                    }
-                                    TextButton(onClick = { onDelete(s.id) }, enabled = !busy) {
-                                        Text("删除", color = MaterialTheme.colorScheme.error)
+                                    TextButton(
+                                        onClick = { onExport(s.id) },
+                                        enabled = !busy,
+                                        contentPadding = PaddingValues(horizontal = 4.dp),
+                                    ) { Text("导出", style = MaterialTheme.typography.labelSmall) }
+                                    TextButton(
+                                        onClick = { pendingRestore = s },
+                                        enabled = !busy,
+                                        contentPadding = PaddingValues(horizontal = 4.dp),
+                                    ) { Text("还原", style = MaterialTheme.typography.labelSmall) }
+                                    TextButton(
+                                        onClick = { onDelete(s.id) },
+                                        enabled = !busy,
+                                        contentPadding = PaddingValues(horizontal = 4.dp),
+                                    ) {
+                                        Text("删除", style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error)
                                     }
                                 }
                                 HorizontalDivider()

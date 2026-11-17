@@ -152,6 +152,8 @@ class MainActivity : ComponentActivity() {
                         onImportSave = { vm.importSave(it) },
                         onRestoreSave = { vm.restoreSave(it) },
                         onDeleteSave = { vm.deleteSave(it) },
+                        onExportSave = { id, uri -> vm.exportSave(id, uri) },
+                        exportNote = state.saveNote,
                         onLoadLauncherLog = { vm.loadLauncherLog() },
                         onLoadGameLog = { vm.loadGameLog() },
                         onCloseLog = { vm.closeLog() },

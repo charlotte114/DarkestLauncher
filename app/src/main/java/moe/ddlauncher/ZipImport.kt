@@ -3,7 +3,6 @@ package moe.ddlauncher
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
-import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
 import java.util.Locale
@@ -13,17 +12,29 @@ import java.util.zip.ZipFile
 /**
  * zip 导入。
  *
- * 移植层自己的导入器只收 zip，而且要求「选中的那一层就是要放进 mods 的文件夹」，
- * 一个包只能一个 mod，一个个挑。这里把麻烦的部分全部自动化：
- *  - 自动剥掉多余的目录层级（"Darkest Dungeon/data/mods/xxx/"、"xxx/"、甚至 __MACOSX 混在里面）
- *  - 自动跳过 __MACOSX / .DS_Store / desktop.ini / .git
- *  - project.xml 是 UTF-16 的自动转 UTF-8（否则引擎读不出来）
- *  - 完全没有 project.xml 的自动补一个（否则游戏根本看不见它）
- *  - 同工坊 ID 的旧版本自动替换，不留一堆重复目录
+ * 一个 zip 里可能有多个 mod（比如从别人那儿打包的一整个 mods 目录）：
+ * 按 project.xml 的位置把每个 mod 拆开，各放各的文件夹。
+ * 已经做了这些自动化：
+ *  - 剥掉多余的目录层级（"Darkest Dungeon/data/mods/xxx/"、"mods/xxx/"、甚至 __MACOSX）
+ *  - 跳过 __MACOSX / .DS_Store / desktop.ini / .git
+ *  - project.xml 是 UTF-16 的自动转 UTF-8
+ *  - 没有 project.xml 的自动补一个
+ *  - 同工坊 ID 的旧版本自动替换
  */
 class ZipImport(private val repo: ModRepo) {
 
     private val badName = Regex("""[/\\:*?"<>|\p{Cntrl}]""")
+
+    /** 常见的「包装层」，不算 mod 本身 */
+    private val wrappers = setOf("assets", "mods", "data", "darkest dungeon", "content", "workshop")
+
+    private class Plan(
+        val root: String,
+        val entries: List<ZipEntry>,
+        val names: List<String>,
+        val meta: ProjectXml.Meta,
+        val fallbackName: String,
+    )
 
     fun import(context: Context, uri: Uri, onProgress: (done: Int, total: Int) -> Unit): ImportOutcome {
         val label = displayName(context, uri) ?: "mod.zip"
@@ -49,105 +60,116 @@ class ZipImport(private val repo: ModRepo) {
             }
 
             ZipFile(temp).use { zip ->
-                val entries = zip.entries().toList().filter { !it.isDirectory && !isJunk(it.name) }
-                if (entries.isEmpty()) return ImportOutcome(short, false, "压缩包是空的")
+                val all = zip.entries().toList().filter { !it.isDirectory && !isJunk(it.name) }
+                if (all.isEmpty()) return ImportOutcome(short, false, "压缩包是空的")
 
-                val names = entries.map { normalize(it.name) }
-                val projectEntry = entries
-                    .filterIndexed { i, _ -> names[i].substringAfterLast('/').equals("project.xml", true) }
-                    .minByOrNull { normalize(it.name).count { c -> c == '/' } }
+                val names = all.map { normalize(it.name) }
+                val plans = buildPlans(zip, all, names, safeName(label) ?: "mod")
+                if (plans.isEmpty()) return ImportOutcome(short, false, "压缩包里没找到能用的文件")
 
-                val root = if (projectEntry != null) {
-                    val dir = normalize(projectEntry.name).substringBeforeLast('/', "")
-                    if (dir.isEmpty()) "" else "$dir/"
-                } else {
-                    guessRoot(names)
-                }
+                val rootDir = Game.modsDir()
+                rootDir.mkdirs()
 
-                val meta = try {
-                    projectEntry?.let { ProjectXml.meta(ProjectXml.readText(zip.getInputStream(it).readBytes())) }
-                        ?: ProjectXml.Meta()
-                } catch (t: Throwable) {
-                    ProjectXml.Meta()
-                }
-
-                val root2 = Game.modsDir()
-                root2.mkdirs()
-
-                // 同工坊 ID → 认为是这个 mod 的新版本，直接替换旧目录
-                var replaced = ""
-                if (meta.workshopId.isNotEmpty()) {
-                    val old = repo.scan().firstOrNull { it.workshopId == meta.workshopId }
-                    if (old != null) {
-                        replaced = old.dir.name
-                        repo.delete(old)
-                    }
-                }
-
-                var dest = File(root2, safeName(label) ?: "mod")
-                if (replaced.isNotEmpty() && File(root2, replaced).exists().not()) {
-                    dest = File(root2, replaced)
-                }
-                var n = 2
-                while (dest.exists()) {
-                    dest = File(root2, "${dest.name.substringBeforeLast(" (")} ($n)")
-                    n++
-                }
-                if (!dest.mkdirs()) return ImportOutcome(short, false, "建不了目录：${dest.path}")
-
-                val total = entries.size
+                val total = all.size
+                var processed = 0
                 var done = 0
                 var bytes = 0L
                 var skipped = 0
+                var replaced = 0
+                val imported = ArrayList<String>()
 
-                for ((index, entry) in entries.withIndex()) {
-                    val rel = extractRel(names[index], root)
-                    if (rel == null) {
-                        skipped++
-                        continue
-                    }
-                    val target = File(dest, rel)
-                    val parent = target.parentFile
-                    if (parent != null && !parent.isDirectory && !parent.mkdirs()) {
-                        skipped++
-                        continue
-                    }
-                    runCatching {
-                        zip.getInputStream(entry).use { input ->
-                            BufferedOutputStream(target.outputStream()).use { out -> bytes = input.copyTo(out, 1 shl 16) + bytes }
+                for (plan in plans) {
+                    // 同工坊 ID → 认为是这个 mod 的新版本，直接替换旧目录
+                    var replacement: String? = null
+                    if (plan.meta.workshopId.isNotEmpty()) {
+                        val old = repo.scan().firstOrNull { it.workshopId == plan.meta.workshopId }
+                        if (old != null) {
+                            replacement = old.dir.name
+                            repo.delete(old)
+                            replaced++
                         }
-                    }.onSuccess { done++ }.onFailure { skipped++ }
-
-                    if (index % 20 == 0 || index == total - 1) onProgress(index + 1, total)
-                }
-
-                if (done == 0) {
-                    repo.deleteTree(dest)
-                    return ImportOutcome(short, false, "压缩包里没找到能用的文件")
-                }
-
-                // 兜底：补 project.xml / 把 UTF-16 转成 UTF-8
-                val projectFile = File(dest, "project.xml")
-                if (!projectFile.isFile) {
-                    val title = meta.title.ifBlank { dest.name }
-                    projectFile.writeText(ProjectXml.template(title), Charsets.UTF_8)
-                } else {
-                    runCatching {
-                        val bytesP = projectFile.readBytes()
-                        val isUtf16 = bytesP.size >= 2 && (
-                            ((bytesP[0].toInt() and 0xFF) == 0xFF && (bytesP[1].toInt() and 0xFF) == 0xFE) ||
-                                ((bytesP[0].toInt() and 0xFF) == 0xFE && (bytesP[1].toInt() and 0xFF) == 0xFF)
-                            )
-                        if (isUtf16) projectFile.writeText(ProjectXml.readText(projectFile), Charsets.UTF_8)
                     }
+
+                    val name = plan.fallbackName
+                    var dest = if (replacement != null) File(rootDir, replacement)
+                    else File(rootDir, name)
+                    var n = 2
+                    while (dest.exists()) {
+                        dest = File(rootDir, "${dest.name.substringBeforeLast(" (")} ($n)")
+                        n++
+                    }
+                    if (!dest.mkdirs()) {
+                        skipped += plan.entries.size
+                        processed += plan.entries.size
+                        onProgress(processed, total)
+                        continue
+                    }
+
+                    var thisDone = 0
+                    for ((i, entry) in plan.entries.withIndex()) {
+                        val rel = extractRel(plan.names[i], plan.root)
+                        if (rel == null) {
+                            skipped++
+                            processed++
+                            continue
+                        }
+                        val target = File(dest, rel)
+                        val parent = target.parentFile
+                        if (parent != null && !parent.isDirectory && !parent.mkdirs()) {
+                            skipped++
+                            processed++
+                            continue
+                        }
+                        runCatching {
+                            zip.getInputStream(entry).use { input ->
+                                BufferedOutputStream(target.outputStream()).use { out ->
+                                    bytes = input.copyTo(out, 1 shl 16) + bytes
+                                }
+                            }
+                        }.onSuccess { thisDone++; done++ }.onFailure { skipped++ }
+
+                        processed++
+                        if (processed % 20 == 0 || processed == total) onProgress(processed, total)
+                    }
+
+                    if (thisDone == 0) {
+                        repo.deleteTree(dest)
+                        continue
+                    }
+
+                    // 兜底：补 project.xml / 把 UTF-16 转成 UTF-8
+                    val projectFile = File(dest, "project.xml")
+                    if (!projectFile.isFile) {
+                        val title = plan.meta.title.ifBlank { dest.name }
+                        projectFile.writeText(ProjectXml.template(title), Charsets.UTF_8)
+                    } else {
+                        runCatching {
+                            val bytesP = projectFile.readBytes()
+                            val isUtf16 = bytesP.size >= 2 && (
+                                ((bytesP[0].toInt() and 0xFF) == 0xFF && (bytesP[1].toInt() and 0xFF) == 0xFE) ||
+                                    ((bytesP[0].toInt() and 0xFF) == 0xFE && bytesP[1].toInt() == 0xFF)
+                                )
+                            if (isUtf16) projectFile.writeText(ProjectXml.readText(projectFile), Charsets.UTF_8)
+                        }
+                    }
+                    imported.add(dest.name)
+                }
+
+                if (imported.isEmpty()) {
+                    return ImportOutcome(short, false, "压缩包里没找到能用的文件")
                 }
 
                 val size = repo.humanSize(bytes)
                 val extra = buildString {
-                    if (replaced.isNotEmpty()) append("，替换旧版本 $replaced")
+                    if (replaced > 0) append("，替换旧版本 $replaced 个")
                     if (skipped > 0) append("，跳过 $skipped 个")
                 }
-                return ImportOutcome(short, true, "已放到 ${dest.name}（$done 个文件，$size$extra）")
+                val detail = if (imported.size == 1) {
+                    "已放到 ${imported.first()}（$done 个文件，$size$extra）"
+                } else {
+                    "识别出 ${imported.size} 个 mod：${imported.joinToString("、")}（$done 个文件，$size$extra）"
+                }
+                return ImportOutcome(short, true, detail)
             }
         } catch (t: Throwable) {
             return ImportOutcome(short, false, t.message ?: t.javaClass.simpleName)
@@ -156,24 +178,78 @@ class ZipImport(private val repo: ModRepo) {
         }
     }
 
-    /** 没有 project.xml 时猜 mod 根目录：只有一个顶层文件夹就用它，否则当成平铺 */
-    private fun guessRoot(names: List<String>): String {
-        val firsts = names.map { it.substringBefore('/') }.distinct()
-        if (firsts.size == 1 && names.any { it.contains('/') }) {
-            val only = firsts.first().lowercase(Locale.ROOT)
-            if (only == "assets" || only == "mods" || only == "data" || only == "darkest dungeon") {
-                // 再往下一层看，例如 mods/MyMod/...
-                val depth2 = names.mapNotNull { n ->
-                    val p = n.split('/')
-                    if (p.size > 2) p[1] else null
-                }.distinct()
-                if (depth2.size == 1) return "${firsts.first()}/${depth2.first()}/"
+    /**
+     * 把压缩包拆成若干 mod：
+     *  1. 有 project.xml 的，以它所在的目录为界（最可靠）
+     *  2. 没有 project.xml 的，先剥掉公共包装层，再按顶层文件夹拆
+     */
+    private fun buildPlans(
+        zip: ZipFile,
+        all: List<ZipEntry>,
+        names: List<String>,
+        zipLabel: String,
+    ): List<Plan> {
+        val projectByRoot = LinkedHashMap<String, ZipEntry>()
+        names.forEachIndexed { i, n ->
+            if (n.substringAfterLast('/').equals("project.xml", true)) {
+                val dir = n.substringBeforeLast('/', "")
+                val root = if (dir.isEmpty()) "" else "$dir/"
+                if (!projectByRoot.containsKey(root)) projectByRoot[root] = all[i]
             }
-            return "${firsts.first()}/"
         }
+
+        val roots = if (projectByRoot.isNotEmpty()) {
+            projectByRoot.keys.toList()
+        } else {
+            rootsWithoutProject(names)
+        }
+
+        return roots.mapNotNull { root ->
+            val idx = names.indices.filter { names[it].startsWith(root) }
+            if (idx.isEmpty()) return@mapNotNull null
+            val meta = projectByRoot[root]?.let { entry ->
+                runCatching { ProjectXml.meta(ProjectXml.readText(zip.getInputStream(entry).readBytes())) }
+                    .getOrDefault(ProjectXml.Meta())
+            } ?: ProjectXml.Meta()
+
+            val folderName = root.trimEnd('/').substringAfterLast('/').takeIf { it.isNotBlank() }
+            val fallback = safeName(meta.title) ?: safeName(folderName ?: zipLabel) ?: "mod"
+            Plan(
+                root = root,
+                entries = idx.map { all[it] },
+                names = idx.map { names[it] },
+                meta = meta,
+                fallbackName = fallback,
+            )
+        }
+    }
+
+    /** 没有 project.xml 时：剥公共包装层，然后按顶层目录拆成多个 mod */
+    private fun rootsWithoutProject(names: List<String>): List<String> {
+        var rest = names
+        var prefix = ""
+        while (true) {
+            val firsts = rest.map { it.substringBefore('/') }.distinct()
+            if (firsts.size == 1 && firsts.first().lowercase(Locale.ROOT) in wrappers &&
+                rest.any { it.contains('/') }
+            ) {
+                prefix += firsts.first() + "/"
+                rest = rest.map { it.substringAfter('/') }.filter { it.isNotBlank() }
+            } else break
+        }
+
+        val firsts = rest.map { it.substringBefore('/') }.distinct()
         val known = Game.DATA_DIRS.map { it.lowercase(Locale.ROOT) }.toSet()
-        if (firsts.all { it.lowercase(Locale.ROOT) in known }) return ""
-        return ""
+        if (firsts.size == 1) {
+            val f = firsts.first()
+            return listOf(prefix + if (f.lowercase(Locale.ROOT) in known || !rest.any { it.contains('/') }) "" else "$f/")
+        }
+        if (firsts.all { it.lowercase(Locale.ROOT) in known }) return listOf(prefix)
+
+        val mods = firsts.filterNot { it.lowercase(Locale.ROOT) in known }
+        val result = mods.map { "$prefix$it/" }.toMutableList()
+        if (mods.size != firsts.size) result.add(prefix)
+        return result
     }
 
     private fun extractRel(name: String, root: String): String? {

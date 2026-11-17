@@ -115,6 +115,8 @@ fun ModsApp(
     onImportSave: (Uri) -> Unit,
     onRestoreSave: (String) -> Unit,
     onDeleteSave: (String) -> Unit,
+    onExportSave: (String, Uri?) -> Unit,
+    exportNote: String?,
     onLoadLauncherLog: () -> Unit,
     onLoadGameLog: () -> Unit,
     onCloseLog: () -> Unit,
@@ -125,6 +127,7 @@ fun ModsApp(
     var showSaves by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
     var confirmRemovePack by remember { mutableStateOf(false) }
+    var pendingExportId by remember { mutableStateOf<String?>(null) }
 
     // versionName 是「游戏 2.2.1 · 启动器 0.4.19」这种拼出来的串，两处各取一半
     val gameVer = state.versionName.substringBefore("·").trim()
@@ -143,6 +146,14 @@ fun ModsApp(
     val savePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri -> if (uri != null) onImportSave(uri) }
+
+    // 导出存档：让用户挑文件夹；取消就当没点（「导出到 Download」按钮不用这个选择器）
+    val exportPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        pendingExportId?.let { onExportSave(it, uri) }
+        pendingExportId = null
+    }
 
     Scaffold(
         topBar = {
@@ -285,6 +296,12 @@ fun ModsApp(
             },
             onRestore = onRestoreSave,
             onDelete = onDeleteSave,
+            onExport = { id ->
+                pendingExportId = id
+                exportPicker.launch(null)
+            },
+            onExportDefault = { id -> onExportSave(id, null) },
+            exportNote = exportNote,
             onDismiss = { showSaves = false },
         )
     }

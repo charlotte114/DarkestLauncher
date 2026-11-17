@@ -1,6 +1,10 @@
 package moe.ddlauncher
 
+import android.content.Context
+import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import java.util.Collections
 import java.io.File
 import java.text.SimpleDateFormat
@@ -102,6 +106,36 @@ object SaveRepo {
     }
 
     /** 还原自己备份过的快照 */
+    /**
+     * 把某份快照导出到用户指定的文件夹。
+     * treeUri 为空 = 默认导出到 Download/DarkestSaves/。
+     * 指定文件夹走 SAF，这样用户挑 U 盘、网盘目录也能写。
+     */
+    fun exportTo(ctx: Context, snapshot: Snapshot, treeUri: Uri?): String {
+        require(snapshot.file.isFile) { "备份文件不见了：${snapshot.file.name}" }
+        val name = snapshot.file.name
+
+        if (treeUri == null) {
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "DarkestSaves")
+            if (!dir.exists() && !dir.mkdirs()) throw IllegalStateException("建不了导出目录：${dir.absolutePath}")
+            val target = File(dir, name)
+            snapshot.file.copyTo(target, overwrite = true)
+            return target.absolutePath.replace("/storage/emulated/0", "内部存储")
+        }
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            throw IllegalStateException("系统版本太低，不支持指定文件夹")
+        }
+        val root = DocumentsContract.getTreeDocumentId(treeUri)
+        val parent = DocumentsContract.buildDocumentUriUsingTree(treeUri, root)
+        val created = DocumentsContract.createDocument(ctx.contentResolver, parent, "application/zip", name)
+            ?: throw IllegalStateException("这个文件夹不让写，换一个试试")
+        ctx.contentResolver.openOutputStream(created)?.use { out ->
+            snapshot.file.inputStream().buffered().use { it.copyTo(out, 1 shl 16) }
+        } ?: throw IllegalStateException("写不进这个文件夹")
+        return name
+    }
+
     fun restore(snapshot: Snapshot) {
         require(snapshot.file.isFile) { "备份文件不见了：${snapshot.file.name}" }
         installZip(snapshot.file, "before-restore")
