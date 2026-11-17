@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+        Steam 的 SteamPipe 内容服务器（尤其 Steam 中国的 CDN：st.dl.eccdnx.com /
+        dl.steam.clngaa.com / xz.pphimalayanrt.com）只提供明文 HTTP，而 Android 9+
+        默认禁止 cleartext，表现为每一台 CDN 都报
+        "CLEARTEXT communication ... not permitted by network security policy"，
+        最终汇总成「下载失败：Unable to download UGC manifest」。
+        CM / Web API 走 HTTPS，不受影响。
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
