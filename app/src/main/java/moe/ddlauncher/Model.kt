@@ -8,7 +8,7 @@ import java.io.File
  * 实测出来的关键路径全部集中在这里。
  */
 object Game {
-    const val PKG = "com.darkestdungeon"
+    const val PKG = "com.darkestdungeon.launcher"
     const val LAUNCH_ACTIVITY = "ru.darkest.port.NxActivity"
 
     /** mod 目录：公开可写，第三方 App 拿到「所有文件访问」即可读写 */

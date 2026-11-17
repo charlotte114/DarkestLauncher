@@ -191,7 +191,7 @@ object SaveRepo {
         val maxDepth = segs.minOf { it.size } - 1
         val allowed = setOf(
             "save", "nx", "files", "android", "data",
-            "com.darkestdungeon", "darkestdungeon",
+            "com.darkestdungeon", "com.darkestdungeon.launcher", "darkestdungeon",
         )
         var depth = 0
         var prefix = ""

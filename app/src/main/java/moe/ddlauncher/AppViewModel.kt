@@ -93,7 +93,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 包名沿用 com.darkestdungeon，所以 versionName 必须跟游戏本体一致（2.2.1），
+     * versionName 保持 2.2.1（和内置的游戏运行时一致），避免第三方工具误判版本，
      * 否则第三方更新检查工具会认为"有新版本"并引导卸载重装 —— 那会连 3.6 GB 数据包一起删掉。
      * 启动器自己的版本单独用常量显示。
      */

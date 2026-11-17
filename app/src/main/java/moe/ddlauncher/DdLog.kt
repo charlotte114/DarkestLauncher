@@ -7,7 +7,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 落盘调试日志：`/sdcard/Android/data/com.darkestdungeon/files/ddlauncher.log`
+ * 落盘调试日志：`/sdcard/Android/data/com.darkestdungeon.launcher/files/ddlauncher.log`
  *
  * 工坊下载失败的真正原因（每个 CDN 主机各自的报错）只在 DownloadEvent.LogAppended 里，
  * UI 只显示最后一行且失败后会清掉输出目录，所以必须同步写一份到外部目录，

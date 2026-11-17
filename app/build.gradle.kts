@@ -19,8 +19,8 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        // 与游戏同包名：mods 目录、存档路径与官方版完全一致，现有 mod 无需迁移
-        applicationId = "com.darkestdungeon"
+        // 独立包名：可以和原版游戏共存；数据目录也跟着换成这个包名
+        applicationId = "com.darkestdungeon.launcher"
         minSdk = 26
         targetSdk = 36
         versionCode = 202201

@@ -187,13 +187,13 @@ class MainActivity : ComponentActivity() {
      * adb 调试入口，省得靠点屏幕测下载：
      *
      * ```bash
-     * adb shell am start -n com.darkestdungeon/moe.ddlauncher.MainActivity -e dl 840391233
-     * adb shell am start -n com.darkestdungeon/moe.ddlauncher.MainActivity -e checkupdates 1
-     * adb shell am start -n com.darkestdungeon/moe.ddlauncher.MainActivity -e dumpopts 1
-     * adb shell am start -n com.darkestdungeon/moe.ddlauncher.MainActivity -e optset music_volume=35
+     * adb shell am start -n com.darkestdungeon.launcher/moe.ddlauncher.MainActivity -e dl 840391233
+     * adb shell am start -n com.darkestdungeon.launcher/moe.ddlauncher.MainActivity -e checkupdates 1
+     * adb shell am start -n com.darkestdungeon.launcher/moe.ddlauncher.MainActivity -e dumpopts 1
+     * adb shell am start -n com.darkestdungeon.launcher/moe.ddlauncher.MainActivity -e optset music_volume=35
      * ```
      *
-     * 日志都落在 /sdcard/Android/data/com.darkestdungeon/files/ddlauncher.log。
+     * 日志都落在 /sdcard/Android/data/com.darkestdungeon.launcher/files/ddlauncher.log。
      */
     private fun handleDebugIntent(intent: Intent?) {
         val dl = intent?.getStringExtra("dl")?.trim()?.toLongOrNull()

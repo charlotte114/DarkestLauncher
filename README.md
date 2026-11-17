@@ -22,9 +22,12 @@
 
 ## 包名说明
 
-`applicationId` 故意沿用 `com.darkestdungeon`，`versionName` 也保持 `2.2.1`：
-这样 mods 目录、存档路径和官方版完全一致，已有 mod 和存档不用迁移，第三方工具也不会提示"有新版本"。
+`applicationId` 是 `com.darkestdungeon.launcher`，可以和原版游戏同时安装、互不覆盖。
+`versionName` 保持 `2.2.1`，与内置的游戏运行时一致，避免第三方工具误判版本。
 启动器自己的版本看设置页：**1.0**。
+
+数据目录随包名走：`/sdcard/Android/data/com.darkestdungeon.launcher/`、`/sdcard/Android/media/com.darkestdungeon.launcher/mods/`，
+与原版游戏完全独立，第一次使用需要重新导入数据包和 mod。
 
 ## 构建
 
