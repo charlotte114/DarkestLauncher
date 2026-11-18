@@ -9,6 +9,7 @@ import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import top.apricityx.workshop.steam.protocol.newDefaultOkHttpClient
 import top.apricityx.workshop.workshop.DownloadEvent
 import top.apricityx.workshop.workshop.DownloadState
 import top.apricityx.workshop.workshop.WorkshopDownloadEngine
@@ -48,15 +49,48 @@ object WorkshopRepo {
      * 几个是 TLS 黑洞：默认 30s 连接超时会让一次查询卡上好几分钟。改成短超时 + 上层重试，
      * 单次失败几秒内就能换下一条。CM WebSocket 和 CDN 下载仍用 [client]（要长连接）。
      */
-    private val apiClient = client.newBuilder()
-        // 连接超时压到 4 秒很关键：一个域名解析出 8 个 IP，OkHttp 是挨个试的，
-        // 每个黑洞 IP 卡 8 秒的话一次查询就废了；4 秒能让它在 callTimeout 内换掉好几个。
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
-        .writeTimeout(12, TimeUnit.SECONDS)
-        .callTimeout(40, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
+    private val apiClient: OkHttpClient by lazy {
+        WattAccelerator.decorate(
+            client.newBuilder()
+                // 连接超时压到 4 秒很关键：一个域名解析出 8 个 IP，OkHttp 是挨个试的，
+                // 每个黑洞 IP 卡 8 秒的话一次查询就废了；4 秒能让它在 callTimeout 内换掉好几个。
+                .connectTimeout(4, TimeUnit.SECONDS)
+                .readTimeout(12, TimeUnit.SECONDS)
+                .writeTimeout(12, TimeUnit.SECONDS)
+                .callTimeout(40, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+        ).build()
+    }
+
+    /**
+     * 下载专用的客户端，参数跟上游 `DownloadCenterManager` 里那个 taskClient 对齐：
+     * `applyDefaultHttpTimeouts()` + `applySteamHttpCompatibility()`，即连接/读/写都 30 秒、
+     * 强制 HTTP/1.1（也就是 `newDefaultOkHttpClient()`）。
+     *
+     * 之前这里写的是读写 120 秒，理由是"怕大 chunk 半路被掐"。其实 OkHttp 的 readTimeout 是
+     * **单次读**超时，只要数据还在流动就不会触发；反过来，一个卡死的 chunk 要等 120 秒才失败，
+     * 这一格并发就白占两分钟，整包看起来就慢。上游就是靠 30 秒快速失败 + 换 CDN 重试。
+     */
+    private val downloadClient: OkHttpClient by lazy {
+        WattAccelerator.decorate(
+            newDefaultOkHttpClient()
+                .newBuilder()
+                .retryOnConnectionFailure(true)
+                // OkHttp 默认每个 host 只跑 5 条请求。HTTP/1.1 下每条 chunk 各占一条连接，
+                // 线程数调到 6 以上时多出来的其实在排队 —— 这里放开，让并发数真正生效。
+                .dispatcher(
+                    okhttp3.Dispatcher().apply {
+                        maxRequests = 64
+                        maxRequestsPerHost = 16
+                    }
+                )
+        ).build()
+    }
+
+    /** 启动时把加速通道的 Context 装上；没调过就退回直连 */
+    fun init(context: Context) {
+        WattAccelerator.init(context)
+    }
 
     data class Item(
         val id: Long,
@@ -575,9 +609,14 @@ object WorkshopRepo {
         outputDir: File,
         account: top.apricityx.workshop.steam.protocol.SteamAccountSession? = null,
         maxConcurrentChunks: Int = 4,
+        identity: SteamIdentity? = null,
     ): Flow<DownloadEvent> {
         val engine = WorkshopDownloadEngine.createDefault(
-            client = client,
+            client = downloadClient,
+            sessionFactory = {
+                identity?.newSession(downloadClient)
+                    ?: top.apricityx.workshop.steam.protocol.OkHttpSteamCmSession(downloadClient)
+            },
             sessionConnector = { session, servers ->
                 val canAuth = account != null && account.steamId > 0L && !account.refreshToken.isNullOrBlank()
                 if (canAuth) {
@@ -588,7 +627,9 @@ object WorkshopRepo {
                 }
             },
             maxConcurrentChunks = maxConcurrentChunks.coerceIn(1, 12),
-            allowPublicCdnFallbackOnSessionFailure = true,
+            // 照上游：只有匿名时才允许「CM 连不上就退回公开 CDN」。
+            // 登录了本该拿得到授权，回退反而可能下到不完整/无授权的数据，不如直接报错重试。
+            allowPublicCdnFallbackOnSessionFailure = account == null,
             publishedFileLanguage = "schinese",
         )
         return engine.download(

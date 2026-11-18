@@ -30,6 +30,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        configureImageLoader()
         handleDebugIntent(intent)
         setContent {
             DDLTheme {
@@ -131,6 +132,15 @@ class MainActivity : ComponentActivity() {
                             showWorkshop = false
                             vm.wsLeave()
                         },
+                        groups = state.groups.groups,
+                        downloadGroup = state.groups.downloadTarget,
+                        onSetDownloadGroup = { vm.setDownloadGroup(it) },
+                        onCreateGroup = { name ->
+                            val ok = vm.createGroup(name)
+                            // 在工坊里新建的组，直接设成这次的下载目标
+                            if (ok) vm.setDownloadGroup(vm.state.value.groups.groups.lastOrNull()?.id)
+                            ok
+                        },
                     )
                 } else {
                     ModsApp(
@@ -159,6 +169,12 @@ class MainActivity : ComponentActivity() {
                         onLoadGameLog = { vm.loadGameLog() },
                         onCloseLog = { vm.closeLog() },
                         onOpenGameSettings = { showGameSettings = true },
+                        onCreateGroup = { vm.createGroup(it) },
+                        onRenameGroup = { id, name -> vm.renameGroup(id, name) },
+                        onDeleteGroup = { vm.deleteGroup(it) },
+                        onMoveGroup = { from, to -> vm.moveGroup(from, to) },
+                        onMoveModsToGroup = { ids, gid -> vm.moveModsToGroup(ids, gid) },
+                        onReorderGroup = { gid, ids -> vm.reorderGroup(gid, ids) },
                     )
                 }
 
@@ -230,6 +246,23 @@ class MainActivity : ComponentActivity() {
                 check -> vm.checkModUpdates()
             }
         }, 1200)
+    }
+
+    /** 工坊缩略图也走加速通道（图片 CDN 在 Watt 的名单里），加载不出来的就还是直连 */
+    private fun configureImageLoader() {
+        runCatching {
+            WattAccelerator.init(this)
+            val client = WattAccelerator.decorate(
+                okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            ).build()
+            coil.Coil.setImageLoader(
+                coil.ImageLoader.Builder(this)
+                    .okHttpClient(client)
+                    .build()
+            )
+        }
     }
 
     private fun askForAccess() {

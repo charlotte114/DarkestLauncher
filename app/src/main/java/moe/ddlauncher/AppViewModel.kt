@@ -22,7 +22,10 @@ import kotlinx.coroutines.withTimeout
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
-        const val LAUNCHER_VERSION = "1.1"
+        const val LAUNCHER_VERSION = "1.2"
+
+        /** 搜索硬超时：网络卡住时 30 秒内必须有结果或报错，别一直转圈 */
+        private const val SEARCH_TIMEOUT_MS = 30_000L
     }
 
     data class Ui(
@@ -35,6 +38,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val packSize: Long = 0L,
         val packProgress: String? = null,
         val versionName: String = "",
+        /** 已导入数据包对应的游戏版本（2.2.1 / 2.2.2 …）；读不出来就是 null */
+        val gameVersion: String? = null,
         /** 工坊更新检查：mod 目录名 → 工坊最新 time_updated */
         val updates: Map<String, Long> = emptyMap(),
         val updateBusy: Boolean = false,
@@ -48,11 +53,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         /** 看日志用的文本，非空就弹日志框 */
         val logText: String? = null,
         val logBusy: Boolean = false,
+        /** 自定义分组：组列表 + 归属 + 组内顺序 + 下载目标组 */
+        val groups: ModGroups.Snapshot = ModGroups.Snapshot(),
+        /** mod 详情里改分组后，重新按组排好的段落（给 UI 直接用） */
+        val sections: List<ModGroups.Section> = emptyList(),
     )
 
     private val repo = ModRepo()
     private val importer = ZipImport(repo)
+    private val groupStore = ModGroups(app)
     private var cachedPackSize = -1L
+
+    init {
+        // 加速通道需要 Context 拿开关和日志；失败就静默退回直连
+        runCatching { WorkshopRepo.init(app) }
+    }
 
     private val _state = MutableStateFlow(Ui())
     val state: StateFlow<Ui> = _state.asStateFlow()
@@ -70,7 +85,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val ctx = getApplication<Application>()
             _state.update { it.copy(hasAccess = access, loading = true, versionName = versionName()) }
             if (!access) {
-                _state.update { it.copy(loading = false, mods = emptyList(), conflicts = emptyList()) }
+                _state.update { it.copy(loading = false, mods = emptyList(), conflicts = emptyList(), sections = emptyList()) }
                 return@launch
             }
             val result = withContext(Dispatchers.IO) {
@@ -80,33 +95,47 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val size = if (!installed) 0L else {
                     if (cachedPackSize > 0) cachedPackSize else DataPack.sizeOf(ctx).also { cachedPackSize = it }
                 }
-                Triple(mods, repo.conflicts(mods), installed to size)
+                ScanResult(
+                    mods = mods,
+                    conflicts = repo.conflicts(mods),
+                    installed = installed,
+                    size = size,
+                    version = if (installed) {
+                        DataPack.version(ctx) ?: DataPack.recoverVersion(ctx)
+                    } else null,
+                    groups = groupStore.also { it.invalidate() }.snapshot(),
+                )
             }
             _state.update {
                 it.copy(
                     loading = false,
-                    mods = result.first,
-                    conflicts = result.second,
-                    packInstalled = result.third.first,
-                    packSize = result.third.second,
+                    mods = result.mods,
+                    conflicts = result.conflicts,
+                    packInstalled = result.installed,
+                    packSize = result.size,
+                    gameVersion = result.version,
+                    groups = result.groups,
+                    sections = result.groups.arrange(result.mods),
                 )
             }
         }
     }
 
+    private data class ScanResult(
+        val mods: List<ModInfo>,
+        val conflicts: List<Conflict>,
+        val installed: Boolean,
+        val size: Long,
+        val version: String?,
+        val groups: ModGroups.Snapshot,
+    )
+
     /**
-     * versionName 保持 2.2.1（和内置的游戏运行时一致），避免第三方工具误判版本，
-     * 否则第三方更新检查工具会认为"有新版本"并引导卸载重装 —— 那会连 3.6 GB 数据包一起删掉。
-     * 启动器自己的版本单独用常量显示。
+     * 这里只返回启动器自己的版本。
+     * APK 的 versionName 固定是 2.2.1（和内置运行时对齐，避免第三方工具误判更新），
+     * 但游戏版本要以「这次导入的数据包」为准，见 Ui.gameVersion。
      */
-    private fun versionName(): String {
-        val pkg = runCatching {
-            val ctx = getApplication<Application>()
-            ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: ""
-        }.getOrDefault("")
-        return if (pkg.isBlank()) "启动器 $LAUNCHER_VERSION"
-        else "游戏 $pkg · 启动器 $LAUNCHER_VERSION"
-    }
+    private fun versionName(): String = "启动器 $LAUNCHER_VERSION"
 
     /** 一键开启 / 关闭全部 mod（改 project.xml 后缀，进游戏才生效） */
     fun setAllMods(enabled: Boolean) {
@@ -201,6 +230,67 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             note(if (ok) "已删除 ${info.displayName}" else "删除不完整，可能有文件被占用")
             refresh()
         }
+    }
+
+    // ---------------- 自定义分组 ----------------
+
+    /** 分组只影响启动器里的列表，不动 mods 目录结构（游戏只认平铺的 mod 文件夹） */
+    private fun syncGroups() {
+        val snap = groupStore.snapshot()
+        _state.update { it.copy(groups = snap, sections = snap.arrange(it.mods)) }
+    }
+
+    fun createGroup(name: String): Boolean {
+        val group = groupStore.createGroup(name) ?: return false
+        DdLog.i(getApplication(), "grp", "create ${group.name}")
+        syncGroups()
+        return true
+    }
+
+    fun renameGroup(id: String, name: String): Boolean {
+        val ok = groupStore.renameGroup(id, name)
+        if (ok) syncGroups()
+        return ok
+    }
+
+    fun deleteGroup(id: String) {
+        groupStore.deleteGroup(id)
+        DdLog.i(getApplication(), "grp", "delete $id")
+        syncGroups()
+    }
+
+    fun moveModsToGroup(ids: List<String>, groupId: String?) {
+        if (ids.isEmpty()) return
+        groupStore.assign(ids, groupId)
+        DdLog.i(getApplication(), "grp", "move ${ids.size} -> ${groupId ?: "-"}")
+        syncGroups()
+    }
+
+    /** 拖动排序落库：整组的顺序覆盖写 */
+    fun reorderGroup(groupId: String?, ids: List<String>) {
+        groupStore.setOrder(groupId, ids)
+        syncGroups()
+    }
+
+    fun setDownloadGroup(groupId: String?) {
+        groupStore.setDownloadTarget(groupId)
+        syncGroups()
+    }
+
+    fun moveGroup(from: Int, to: Int) {
+        groupStore.moveGroups(from, to)
+        syncGroups()
+    }
+
+    /** 新下载/新装进来的 mod 归到「下载目标组」；本来就属于某个组的（覆盖安装）不动 */
+    private fun groupNewInstall(dirName: String?) {
+        if (dirName.isNullOrBlank()) return
+        val snap = groupStore.snapshot()
+        val target = snap.downloadTarget ?: return
+        if (!snap.exists(target)) return
+        if (snap.groupOf(dirName).isNotEmpty()) return
+        groupStore.assign(listOf(dirName), target)
+        DdLog.i(getApplication(), "grp", "install $dirName -> ${snap.nameOf(target)}")
     }
 
     fun importZips(uris: List<Uri>) {
@@ -695,11 +785,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     ): WorkshopRepo.InstallResult = withContext(Dispatchers.IO) {
         val item = retryIo { WorkshopRepo.details(id) }
         DdLog.i(ctx, "upd", "resolved id=$id title=${item.title} size=${item.sizeBytes} updated=${item.updated}")
-        val account = SteamAuth.load(ctx)?.toSession("DD Launcher")
+        // 只在确实登录着的时候才用账号态；否则走匿名，才能命中公开 CDN 回退
+        val account = SteamAuth.load(ctx)?.takeIf { _ws.value.loggedIn }?.toSession("DD Launcher")
         val outDir = java.io.File(ctx.cacheDir, "workshop/$id")
-        outDir.deleteRecursively()
+        // 保留 .chunks 缓存以便续传/复用，只有装成功后才清
         outDir.mkdirs()
-        WorkshopRepo.download(item, outDir, account, chunkConcurrency()).collect { ev ->
+        WorkshopRepo.download(
+            item, outDir, account, chunkConcurrency(), SteamIdentity.of(ctx),
+        ).collect { ev ->
             when (ev) {
                 is top.apricityx.workshop.workshop.DownloadEvent.Progress -> {
                     val ratio = ev.totalBytes?.takeIf { it > 0 }?.let {
@@ -717,7 +810,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         val res = WorkshopRepo.install(ctx, repo, item, outDir, preferDir)
-        outDir.deleteRecursively()
+        if (res.ok) outDir.deleteRecursively()
         if (res.ok) {
             prefs.edit()
                 .putLong(item.id.toString(), item.updated)
@@ -920,45 +1013,58 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 搜索整个工坊：公开条目匿名可搜（爬社区网页），登录/API Key 只作为更快的备用链路 */
+    /**
+     * 搜索整个工坊：公开条目匿名可搜（CM / 网页兜底），登录 / API Key 只是更快的备用链路。
+     *
+     * 排序策略照搬上游 `searchCurrentGameWorkshop`：
+     * **有搜索词时一律按「文本相关度」搜、且不限时间窗**。
+     * 否则「本周 + 订阅最多」这类过滤会叠在关键词上，把结果压到几乎没有，
+     * 表现出来就是「搜不到东西」。UI 上用户选的排序/时间窗保持不变，只影响浏览。
+     */
     fun wsSearchOnline(append: Boolean = false) {
         val key = _ws.value.apiKey.trim()
         val account = SteamAuth.load(getApplication())
         val text = _ws.value.query.trim()
-        val sort = _ws.value.sort
+        val searching = text.isNotBlank()
+        // 搜索就用 Popular 的文本相关度 query_type（12），时间窗不参与
+        val reqSort = if (searching) WorkshopCatalog.Sort.Popular else _ws.value.sort
+        val reqDays = if (searching) 0 else if (reqSort.supportsTimeWindow) _ws.value.timeWindow.days else 0
         val page = if (append) _ws.value.onlinePage + 1 else 1
         val ctx = getApplication<Application>()
-        DdLog.i(ctx, "search", "start text=[$text] sort=${sort.label} days=${if (sort.supportsTimeWindow) _ws.value.timeWindow.days else 0} page=$page loggedIn=${account != null} hasKey=${key.isNotEmpty()}")
+        DdLog.i(
+            ctx, "search",
+            "start text=[$text] sort=${reqSort.label}${if (reqSort != _ws.value.sort) "(UI:${_ws.value.sort.label})" else ""} " +
+                "days=$reqDays page=$page loggedIn=${account != null} hasKey=${key.isNotEmpty()}",
+        )
         viewModelScope.launch {
+            // 刷新（非翻页）时不清空旧列表，避免搜一下先闪成空白
             _ws.update { it.copy(loadingList = true, error = null, onlinePage = page) }
             val res = runCatching {
-                when {
-                    // 登录态走 CM：实测 access_token 不被 IPublishedFileService 接受，别浪费一次请求
-                    account != null ->
-                        // CM 偶尔掉线，搜一次自动重连一次
-                        retryIo(times = 2) {
-                            WorkshopRepo.searchViaCm(
-                                account.toSession("DD Launcher"), text, page, sort,
-                                days = if (sort.supportsTimeWindow) _ws.value.timeWindow.days else 0,
-                            )
-                        }
-                    key.isNotEmpty() -> WorkshopRepo.queryFiles(key, text, page, sort)
-                        .let { WorkshopRepo.SubscriptionPage(it, it.size) }
-                    // 匿名：先用 CM（下载 mod 本来就在用的节点，不需要网页）；CM 不行再退回爬网页
-                    else -> runCatching {
-                        retryIo(times = 2) {
-                            WorkshopRepo.searchAnonymousViaCm(
-                                text, page, sort,
-                                days = if (sort.supportsTimeWindow) _ws.value.timeWindow.days else 0,
-                            )
-                        }
-                    }.recoverCatching { cmErr ->
-                        DdLog.i(ctx, "search", "匿名 CM 失败，退回网页抓取：${cmErr.message}")
-                        WorkshopBrowseRepo.search(
-                            text, page, sort,
-                            days = if (sort.supportsTimeWindow) _ws.value.timeWindow.days else 0,
-                        ).let { WorkshopRepo.SubscriptionPage(it.items, it.total) }
-                    }.getOrThrow()
+                // 30 秒硬超时：网络卡住时别让用户一直看着转圈
+                withTimeout(SEARCH_TIMEOUT_MS) {
+                    when {
+                        // 登录态走 CM：实测 access_token 不被 IPublishedFileService 接受，别浪费一次请求
+                        account != null ->
+                            // CM 偶尔掉线，搜一次自动重连一次
+                            retryIo(times = 2) {
+                                WorkshopRepo.searchViaCm(
+                                    account.toSession("DD Launcher"), text, page, reqSort,
+                                    days = reqDays,
+                                )
+                            }
+                        key.isNotEmpty() -> WorkshopRepo.queryFiles(key, text, page, reqSort)
+                            .let { WorkshopRepo.SubscriptionPage(it, it.size) }
+                        // 匿名：先用 CM（下载 mod 本来就在用的节点，不需要网页）；CM 不行再退回爬网页
+                        else -> runCatching {
+                            retryIo(times = 2) {
+                                WorkshopRepo.searchAnonymousViaCm(text, page, reqSort, days = reqDays)
+                            }
+                        }.recoverCatching { cmErr ->
+                            DdLog.i(ctx, "search", "匿名 CM 失败，退回网页抓取：${cmErr.message}")
+                            WorkshopBrowseRepo.search(text, page, reqSort, days = reqDays)
+                                .let { WorkshopRepo.SubscriptionPage(it.items, it.total) }
+                        }.getOrThrow()
+                    }
                 }
             }
             res.onSuccess { result ->
@@ -982,11 +1088,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }.onFailure { e ->
                 DdLog.e(getApplication(), "search", e)
+                val networkish = generateSequence(e) { it.cause }.any {
+                    it is java.io.IOException ||
+                        it is kotlinx.coroutines.TimeoutCancellationException ||
+                        it.javaClass.simpleName.contains("Timeout", ignoreCase = true)
+                }
                 _ws.update {
                     it.copy(
                         loadingList = false,
                         onlineLoadingMore = false,
-                        error = "联网搜索失败：${FailText.of(e)}",
+                        error = if (networkish)
+                            "连不上创意工坊：网络环境可能无法直连 Steam，开加速器 / 科学上网后重试，或登录 Steam 账号"
+                        else "联网搜索失败：${FailText.of(e)}",
                     )
                 }
             }
@@ -1398,7 +1511,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         wsDownloadJob = viewModelScope.launch {
             val ctx = getApplication<Application>()
             val outDir = java.io.File(ctx.cacheDir, "workshop/${item.id}")
-            outDir.deleteRecursively()
+            // 不删缓存：引擎会按 chunk 复用（.chunks/*.chunk），删了就等于每次从零下，
+            // 网络一抖就白费。成功安装后再清，失败/取消留着下次续传。
             outDir.mkdirs()
             DdLog.i(ctx, "dl", "==== start id=${item.id} title=${item.title} ====")
             DdLog.i(ctx, "dl", "cacheDir=$outDir sdk=${Build.VERSION.SDK_INT} chunks=${chunkConcurrency()} loggedIn=${_ws.value.loggedIn}")
@@ -1410,7 +1524,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             try {
                 val account = SteamAuth.load(ctx)?.takeIf { _ws.value.loggedIn }?.toSession("DD Launcher")
-                WorkshopRepo.download(item, outDir, account, chunkConcurrency()).collect { ev ->
+                // 进度刷新节流 + 速度采样：每块完成都重组整页太浪费，200ms 一次足够
+                var lastUiAt = 0L
+                var sampleAt = System.currentTimeMillis()
+                var sampleBytes = 0L
+                var speed = 0L
+                WorkshopRepo.download(
+                    item, outDir, account, chunkConcurrency(), SteamIdentity.of(ctx),
+                ).collect { ev ->
                     when (ev) {
                         is top.apricityx.workshop.workshop.DownloadEvent.StateChanged ->
                             _ws.update { it.copy(status = WorkshopRepo.stateLabel(ev.state)) }
@@ -1420,12 +1541,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             val ratio = if (total != null && total > 0) {
                                 (ev.writtenBytes.toFloat() / total).coerceIn(0f, 1f)
                             } else null
-                            _ws.update {
-                                it.copy(
-                                    progress = ratio,
-                                    detail = "${DataPack.gb(ev.writtenBytes)}" +
-                                        if (total != null && total > 0) " / ${DataPack.gb(total)}" else "",
-                                )
+                            val now = System.currentTimeMillis()
+                            val finished = ev.totalChunks != null && ev.completedChunks == ev.totalChunks
+                            if (finished || now - lastUiAt >= 200) {
+                                lastUiAt = now
+                                val dt = now - sampleAt
+                                if (dt >= 500) {
+                                    speed = ((ev.writtenBytes - sampleBytes) * 1000 / dt).coerceAtLeast(0)
+                                    sampleAt = now
+                                    sampleBytes = ev.writtenBytes
+                                }
+                                _ws.update {
+                                    it.copy(
+                                        progress = ratio,
+                                        detail = buildString {
+                                            append(DataPack.gb(ev.writtenBytes))
+                                            if (total != null && total > 0) append(" / ${DataPack.gb(total)}")
+                                            if (speed > 0) append(" · ${DataPack.gb(speed)}/s")
+                                        },
+                                    )
+                                }
                             }
                         }
 
@@ -1454,9 +1589,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         .putLong(item.id.toString(), item.updated)
                         .putString("dir_${item.id}", installed.dirName)
                         .apply()
+                    groupNewInstall(installed.dirName)
                     loadWorkshopInstalled()
                 }
-                outDir.deleteRecursively()
+                // 装成功才清缓存；装了失败也保留，下次还能复用已下好的 chunk
+                if (installed.ok) outDir.deleteRecursively()
                 _ws.update {
                     it.copy(
                         downloading = false,
@@ -1469,12 +1606,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 wsNote("工坊：${installed.message}")
                 refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
-                DdLog.i(ctx, "dl", "cancelled by user")
-                outDir.deleteRecursively()
+                // 取消当暂停：不清缓存，下次点下载接着下
+                DdLog.i(ctx, "dl", "cancelled by user（保留缓存，可续传）")
                 throw e
             } catch (e: Throwable) {
                 DdLog.e(ctx, "dl", e)
-                outDir.deleteRecursively()
+                // 失败也保留缓存：已完成的 chunk 下次直接复用，不用从头再下
                 _ws.update {
                     it.copy(
                         downloading = false,

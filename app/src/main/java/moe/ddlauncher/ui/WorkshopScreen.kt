@@ -43,10 +43,13 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -75,6 +78,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import moe.ddlauncher.AppViewModel
 import moe.ddlauncher.DataPack
+import moe.ddlauncher.ModGroup
 import moe.ddlauncher.WorkshopCatalog
 import moe.ddlauncher.WorkshopRepo
 import java.text.SimpleDateFormat
@@ -114,6 +118,10 @@ fun WorkshopScreen(
     onCheckUpdates: () -> Unit,
     onUpdateAll: () -> Unit,
     onBack: () -> Unit,
+    groups: List<ModGroup> = emptyList(),
+    downloadGroup: String? = null,
+    onSetDownloadGroup: (String?) -> Unit = {},
+    onCreateGroup: (String) -> Boolean = { false },
 ) {
     var keyDraft by remember { mutableStateOf(state.apiKey) }
 
@@ -158,6 +166,10 @@ fun WorkshopScreen(
                     onToggleSubscribe = onToggleSubscribe,
                     onShowLogin = onShowLogin,
                     onCancelDownload = onCancelDownload,
+                    groups = groups,
+                    downloadGroup = downloadGroup,
+                    onSetDownloadGroup = onSetDownloadGroup,
+                    onCreateGroup = onCreateGroup,
                 )
             } else {
                 BrowsePane(
@@ -636,8 +648,17 @@ private fun DetailPane(
     onToggleSubscribe: (Long, String, Boolean) -> Unit,
     onShowLogin: () -> Unit,
     onCancelDownload: () -> Unit,
+    groups: List<ModGroup>,
+    downloadGroup: String?,
+    onSetDownloadGroup: (String?) -> Unit,
+    onCreateGroup: (String) -> Boolean,
 ) {
     val item = state.item ?: return
+    var groupMenu by remember { mutableStateOf(false) }
+    var newGroupOpen by remember { mutableStateOf(false) }
+    var newGroupName by remember { mutableStateOf("") }
+    var newGroupError by remember { mutableStateOf<String?>(null) }
+    val currentGroupName = groups.firstOrNull { it.id == downloadGroup }?.name ?: "未分组"
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -699,6 +720,56 @@ private fun DetailPane(
                             )
                         }
                         Spacer(Modifier.height(12.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "下载到",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Box {
+                                TextButton(onClick = { groupMenu = true }) {
+                                    Text(
+                                        buildString {
+                                            append(currentGroupName)
+                                            if (groups.isNotEmpty()) append(" ▾")
+                                        },
+                                        style = MaterialTheme.typography.labelLarge,
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = groupMenu,
+                                    onDismissRequest = { groupMenu = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("未分组") },
+                                        onClick = {
+                                            groupMenu = false
+                                            onSetDownloadGroup(null)
+                                        },
+                                    )
+                                    groups.forEach { g ->
+                                        DropdownMenuItem(
+                                            text = { Text(g.name) },
+                                            onClick = {
+                                                groupMenu = false
+                                                onSetDownloadGroup(g.id)
+                                            },
+                                        )
+                                    }
+                                    HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = { Text("＋ 新建分组…") },
+                                        onClick = {
+                                            groupMenu = false
+                                            newGroupName = ""
+                                            newGroupError = null
+                                            newGroupOpen = true
+                                        },
+                                    )
+                                }
+                            }
+                        }
                         Button(
                             onClick = onDownload,
                             enabled = !state.downloading && !state.looking,
@@ -763,6 +834,57 @@ private fun DetailPane(
             }
         }
 
+    }
+
+    if (newGroupOpen) {
+        AlertDialog(
+            onDismissRequest = { newGroupOpen = false },
+            title = { Text("新建分组") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = newGroupName,
+                        onValueChange = {
+                            newGroupName = it
+                            newGroupError = null
+                        },
+                        label = { Text("分组名称") },
+                        singleLine = true,
+                    )
+                    newGroupError?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "建好后下载的 mod 会直接进这个组，列表里也能再调。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val group = newGroupName.trim()
+                        if (group.isBlank()) {
+                            newGroupError = "名字不能为空"
+                        } else if (!onCreateGroup(group)) {
+                            newGroupError = "已经有同名分组"
+                        } else {
+                            newGroupOpen = false
+                        }
+                    },
+                ) { Text("创建") }
+            },
+            dismissButton = {
+                TextButton(onClick = { newGroupOpen = false }) { Text("取消") }
+            },
+        )
     }
 }
 

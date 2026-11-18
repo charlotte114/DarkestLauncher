@@ -28,15 +28,18 @@ object WorkshopBrowseRepo {
     private const val ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 
     /** 网页抓取专用客户端：短超时 + 失败重试，避免国内网络下一个黑洞 IP 卡死 */
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .callTimeout(30, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
+    private val client: OkHttpClient by lazy {
+        WattAccelerator.decorate(
+            OkHttpClient.Builder()
+                .connectTimeout(6, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
+                .writeTimeout(15, TimeUnit.SECONDS)
+                .callTimeout(30, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .followRedirects(true)
+                .followSslRedirects(true)
+        ).build()
+    }
 
     /** 网页里 browsesort / actualsort 的值，对应启动器的四种排序 */
     private fun sortValues(sort: WorkshopCatalog.Sort): Pair<String, String> = when (sort) {

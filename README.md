@@ -19,7 +19,8 @@
   排序（热门、最新、更新、订阅数）/ 时间范围 / 分页，下载后自动解包到
   `Android/media/com.darkestdungeon/mods/`，支持订阅、检查更新、一键全更
 - **mod 管理**：开关（改 `project.xml` 后缀）、单条详情、覆盖冲突提示、一键全开 / 全关、
-  批量导入 zip（一个包里的多个 mod 会逐个识别）
+  批量导入 zip（一个包里的多个 mod 会逐个识别）、自定义分组（可命名 / 折叠 / 批量归组 /
+  长按拖动排序，下载时可选目标组）
 - **存档**：快照备份、还原、删除、导入 zip、导出（默认 `Download/DarkestSaves/`，或自选目录）
 - **游戏内设置**：直接改 `persist.options.json` —— 分辨率、帧率、模糊、Gamma、五路音量、语言、
   字幕、玩法开关；写入前自动备份，可一键还原
@@ -30,7 +31,9 @@
 
 `applicationId` 是 `com.darkestdungeon.launcher`，可以和原版游戏同时安装、互不覆盖。
 `versionName` 保持 `2.2.1`，与内置的游戏运行时一致，避免第三方工具误判版本。
-启动器自己的版本看设置页：**1.1**。
+主界面上的「游戏 x.x.x」不是这个字段，而是**你导入的那份数据包的版本**（导入时读包里的
+`AndroidManifest.xml`，读不到就用文件名猜，再不行显示「版本未知」）。
+启动器自己的版本看设置页：**1.2**。
 
 数据目录随包名走：`/sdcard/Android/data/com.darkestdungeon.launcher/`、`/sdcard/Android/media/com.darkestdungeon.launcher/mods/`，
 与原版游戏完全独立，第一次使用需要重新导入数据包和 mod。

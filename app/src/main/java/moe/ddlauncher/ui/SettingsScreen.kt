@@ -24,6 +24,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -34,6 +35,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -43,6 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import moe.ddlauncher.About
 import moe.ddlauncher.AppViewModel
+import moe.ddlauncher.WattAccelerator
 import moe.ddlauncher.DdLog
 
 /**
@@ -167,6 +170,29 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        Spacer(Modifier.height(12.dp))
+                        val ctx = LocalContext.current
+                        var wattOn by remember { mutableStateOf(WattAccelerator.isEnabled(ctx)) }
+                        HorizontalDivider()
+                        Spacer(Modifier.height(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Steam 加速通道（实验）", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "照搬 Watt Toolkit 的转发节点，给社区 / 商店接口 / 图片加速；" +
+                                        "连不上会自动回退直连。工坊 mod 本体走 CDN，不走这条通道。",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Switch(
+                                checked = wattOn,
+                                onCheckedChange = {
+                                    wattOn = it
+                                    WattAccelerator.setEnabled(ctx, it)
+                                },
+                            )
+                        }
                         Spacer(Modifier.height(10.dp))
                         OutlinedButton(onClick = onClearCache) { Text("清理下载缓存") }
                         Spacer(Modifier.height(4.dp))
@@ -250,7 +276,17 @@ fun SettingsScreen(
                             fontWeight = FontWeight.Bold,
                         )
                         Text(
-                            state.versionName.ifBlank { "启动器" },
+                            buildString {
+                                append(state.versionName.ifBlank { "启动器" })
+                                append(" · ")
+                                append(
+                                    when {
+                                        !state.packInstalled -> "数据包未导入"
+                                        state.gameVersion != null -> "游戏 ${state.gameVersion}"
+                                        else -> "游戏版本未知"
+                                    }
+                                )
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

@@ -10,6 +10,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,7 +27,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -34,8 +38,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -47,7 +56,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
@@ -58,6 +70,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -69,8 +82,11 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,6 +94,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -90,11 +107,15 @@ import moe.ddlauncher.AppViewModel
 import moe.ddlauncher.Conflict
 import moe.ddlauncher.DataPack
 import moe.ddlauncher.Game
+import moe.ddlauncher.ModGroup
+import moe.ddlauncher.ModGroups
 import moe.ddlauncher.ModInfo
 import moe.ddlauncher.R
 import moe.ddlauncher.ModRepo
 import java.io.File
 import java.util.Locale
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -124,18 +145,40 @@ fun ModsApp(
     onLoadGameLog: () -> Unit,
     onCloseLog: () -> Unit,
     onOpenGameSettings: () -> Unit,
+    onCreateGroup: (String) -> Boolean,
+    onRenameGroup: (String, String) -> Boolean,
+    onDeleteGroup: (String) -> Unit,
+    onMoveGroup: (Int, Int) -> Unit,
+    onMoveModsToGroup: (List<String>, String?) -> Unit,
+    onReorderGroup: (String?, List<String>) -> Unit,
 ) {
     var detailId by remember { mutableStateOf<String?>(null) }
+    var showGroups by remember { mutableStateOf(false) }
     var showConflicts by remember { mutableStateOf(false) }
     var showSaves by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
     var confirmRemovePack by remember { mutableStateOf(false) }
     var pendingExportId by remember { mutableStateOf<String?>(null) }
 
-    // versionName 是「游戏 2.2.1 · 启动器 0.4.19」这种拼出来的串，两处各取一半
-    val gameVer = state.versionName.substringBefore("·").trim()
-    val launcherVer = state.versionName.substringAfter("·", "").trim()
-        .ifBlank { state.versionName }
+    // 游戏版本以导入的数据包为准（从包里的清单读出来的），不再用 APK 的 versionName 冒充
+    val launcherVer = state.versionName.ifBlank { "启动器" }
+    val gameVer = when {
+        !state.packInstalled -> "数据包未导入"
+        state.gameVersion != null -> "游戏 ${state.gameVersion}"
+        else -> "游戏版本未知"
+    }
+
+    // 分组列表：折叠状态、长按拖动中的 mod
+    val listState = rememberLazyListState()
+    val dragScope = rememberCoroutineScope()
+    val collapsed = remember { mutableStateMapOf<String, Boolean>() }
+    var draggingId by remember { mutableStateOf<String?>(null) }
+    // 多选：长按不拖动进入，点条目勾选，底部条整体移动到某个组
+    var selecting by remember { mutableStateOf(false) }
+    val selected = remember { mutableStateMapOf<String, Boolean>() }
+    val latestSections = rememberUpdatedState(state.sections)
+    val latestReorder = rememberUpdatedState(onReorderGroup)
+    val latestMove = rememberUpdatedState(onMoveModsToGroup)
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -192,7 +235,7 @@ fun ModsApp(
             )
         },
         floatingActionButton = {
-            if (state.hasAccess) {
+            if (state.hasAccess && !selecting) {
                 ExtendedFloatingActionButton(
                     onClick = {
                         picker.launch(
@@ -209,8 +252,32 @@ fun ModsApp(
                 )
             }
         },
+        bottomBar = {
+            if (selecting) {
+                SelectionBar(
+                    count = selected.size,
+                    total = state.mods.size,
+                    groups = state.groups.groups,
+                    onSelectAll = {
+                        if (selected.size == state.mods.size) selected.clear()
+                        else state.mods.forEach { selected[it.id] = true }
+                    },
+                    onMove = { gid ->
+                        val ids = selected.keys.toList()
+                        selected.clear()
+                        selecting = false
+                        onMoveModsToGroup(ids, gid)
+                    },
+                    onCancel = {
+                        selected.clear()
+                        selecting = false
+                    },
+                )
+            }
+        },
     ) { inner ->
         LazyColumn(
+            state = listState,
             modifier = Modifier.padding(inner),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -236,7 +303,7 @@ fun ModsApp(
                 GameCard(
                     packInstalled = state.packInstalled,
                     packSize = state.packSize,
-                    version = gameVer.ifBlank { state.versionName },
+                    version = gameVer,
                     onLaunch = onLaunch,
                     onRemove = { confirmRemovePack = true },
                 )
@@ -259,6 +326,7 @@ fun ModsApp(
                         showSaves = true
                     },
                     onLog = { showLog = true },
+                    onGroups = { showGroups = true },
                 )
             }
 
@@ -266,15 +334,61 @@ fun ModsApp(
                 item { EmptyHint() }
             }
 
-            items(state.mods, key = { it.id }) { mod ->
-                ModRow(
-                    mod = mod,
-                    hasUpdate = state.updates.containsKey(mod.id),
-                    busy = state.updateBusy,
-                    onToggle = { onToggle(mod, it) },
-                    onClick = { detailId = mod.id },
-                    onUpdate = { onUpdateMod(mod.id) },
-                )
+            val sections = state.sections
+            if (state.mods.isNotEmpty()) sections.forEach { section ->
+                val key = section.group?.id.orEmpty()
+                val isOpen = collapsed[key] != true
+                item(key = "hdr:$key") {
+                    GroupHeader(
+                        title = section.group?.name ?: ModGroups.UNGROUPED,
+                        count = section.mods.size,
+                        expanded = isOpen,
+                        ungrouped = section.group == null,
+                        groups = state.groups.groups,
+                        onToggle = { collapsed[key] = isOpen },
+                        onMoveAll = { target -> latestMove.value(section.mods.map { it.id }, target) },
+                    )
+                }
+                if (isOpen) {
+                    items(section.mods, key = { "mod:${it.id}" }) { mod ->
+                        ModRow(
+                            mod = mod,
+                            hasUpdate = state.updates.containsKey(mod.id),
+                            busy = state.updateBusy,
+                            dragging = draggingId == mod.id,
+                            selectionMode = selecting,
+                            selected = selected.containsKey(mod.id),
+                            modifier = if (selecting) {
+                                Modifier
+                            } else {
+                                Modifier.modDragToSort(
+                                    modId = mod.id,
+                                    listState = listState,
+                                    scope = dragScope,
+                                    sections = { latestSections.value },
+                                    onReorder = { group, ids -> latestReorder.value(group, ids) },
+                                    onDragState = { on -> draggingId = if (on) mod.id else null },
+                                    onHold = {
+                                        draggingId = null
+                                        selected.clear()
+                                        selected[mod.id] = true
+                                        selecting = true
+                                    },
+                                )
+                            },
+                            onToggle = { onToggle(mod, it) },
+                            onClick = {
+                                if (selecting) {
+                                    if (selected.containsKey(mod.id)) selected.remove(mod.id)
+                                    else selected[mod.id] = true
+                                } else {
+                                    detailId = mod.id
+                                }
+                            },
+                            onUpdate = { onUpdateMod(mod.id) },
+                        )
+                    }
+                }
             }
         }
     }
@@ -283,12 +397,29 @@ fun ModsApp(
     if (detailMod != null) {
         ModSheet(
             mod = detailMod,
+            groups = state.groups.groups,
+            currentGroup = state.groups.groupOf(detailMod.id),
+            onMoveToGroup = { gid -> onMoveModsToGroup(listOf(detailMod.id), gid) },
             onDismiss = { detailId = null },
             onToggle = { onToggle(detailMod, it) },
             onDelete = {
                 detailId = null
                 onDelete(detailMod)
             },
+        )
+    }
+
+    if (showGroups) {
+        GroupManagerDialog(
+            groups = state.groups.groups,
+            modCounts = state.mods.groupingBy { state.groups.groupOf(it.id) }.eachCount(),
+            ungrouped = state.mods.filter { state.groups.groupOf(it.id).isEmpty() }.map { it.id },
+            onCreate = onCreateGroup,
+            onRename = onRenameGroup,
+            onDelete = onDeleteGroup,
+            onMoveGroup = onMoveGroup,
+            onMoveAll = onMoveModsToGroup,
+            onDismiss = { showGroups = false },
         )
     }
 
@@ -627,15 +758,21 @@ private fun StatPill(
     }
 }
 
-/** 游戏设置 / 存档备份 / 运行日志 三个入口 */
+/** 游戏设置 / 存档备份 / 分组 / 运行日志 四个入口 */
 @Composable
-private fun ToolsRow(onGame: () -> Unit, onSaves: () -> Unit, onLog: () -> Unit) {
+private fun ToolsRow(
+    onGame: () -> Unit,
+    onSaves: () -> Unit,
+    onLog: () -> Unit,
+    onGroups: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         ToolButton(Icons.Filled.Build, "游戏设置", onGame, Modifier.weight(1f))
         ToolButton(Icons.Filled.DateRange, "存档备份", onSaves, Modifier.weight(1f))
+        ToolButton(Icons.Filled.Menu, "分组", onGroups, Modifier.weight(1f))
         ToolButton(Icons.Filled.List, "运行日志", onLog, Modifier.weight(1f))
     }
 }
@@ -656,7 +793,12 @@ private fun ToolButton(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(icon, null, Modifier.size(18.dp))
             Spacer(Modifier.height(3.dp))
-            Text(label, style = MaterialTheme.typography.labelMedium)
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -669,21 +811,39 @@ private fun ModRow(
     onToggle: (Boolean) -> Unit,
     onClick: () -> Unit,
     onUpdate: () -> Unit,
+    modifier: Modifier = Modifier,
+    dragging: Boolean = false,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
 ) {
     Card(
         onClick = onClick,
+        modifier = modifier,
+        elevation = CardDefaults.cardElevation(defaultElevation = if (dragging) 10.dp else 0.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (mod.enabled) MaterialTheme.colorScheme.surface
+            containerColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+            else if (mod.enabled) MaterialTheme.colorScheme.surface
             else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
         ),
-        border = if (mod.enabled) {
-            BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.16f))
-        } else null,
+        border = when {
+            dragging -> BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+            selected -> BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+            mod.enabled -> BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.16f))
+            else -> null
+        },
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(start = 10.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
+            Modifier.fillMaxWidth().padding(start = if (selectionMode) 2.dp else 10.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (selectionMode) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = { onClick() },
+                    modifier = Modifier.size(40.dp),
+                )
+                Spacer(Modifier.width(2.dp))
+            }
             ModIcon(mod.iconFile, mod.displayName)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
@@ -731,12 +891,14 @@ private fun ModRow(
                     )
                 }
             }
-            if (hasUpdate) {
+            if (hasUpdate && !selectionMode) {
                 TextButton(onClick = onUpdate, enabled = !busy) {
                     Text("更新")
                 }
             }
-            Switch(checked = mod.enabled, onCheckedChange = onToggle)
+            if (!selectionMode) {
+                Switch(checked = mod.enabled, onCheckedChange = onToggle)
+            }
         }
     }
 }
@@ -776,6 +938,9 @@ private fun ModIcon(file: File?, name: String, size: Int = 52) {
 @Composable
 private fun ModSheet(
     mod: ModInfo,
+    groups: List<ModGroup>,
+    currentGroup: String,
+    onMoveToGroup: (String?) -> Unit,
     onDismiss: () -> Unit,
     onToggle: (Boolean) -> Unit,
     onDelete: () -> Unit,
@@ -811,6 +976,13 @@ private fun ModSheet(
                 }
                 Switch(checked = mod.enabled, onCheckedChange = onToggle)
             }
+
+            Spacer(Modifier.height(10.dp))
+            GroupPicker(
+                current = currentGroup,
+                groups = groups,
+                onPick = onMoveToGroup,
+            )
 
             if (mod.tags.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
@@ -987,6 +1159,484 @@ private fun BusyDialog(text: String) {
             }
         },
         icon = { CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp) },
+    )
+}
+
+// ---------------- 分组 ----------------
+
+/** 分组段落标题：点一下折叠，未分组那段还能「全部移入」某个组 */
+@Composable
+private fun GroupHeader(
+    title: String,
+    count: Int,
+    expanded: Boolean,
+    ungrouped: Boolean,
+    groups: List<ModGroup>,
+    onToggle: () -> Unit,
+    onMoveAll: (String?) -> Unit,
+) {
+    var menu by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onToggle() }
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    if (expanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "$count",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (ungrouped && groups.isNotEmpty() && count > 0) {
+                Box {
+                    TextButton(
+                        onClick = { menu = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text("全部移入", style = MaterialTheme.typography.labelMedium)
+                    }
+                    GroupMenu(
+                        expanded = menu,
+                        groups = groups,
+                        showUngrouped = false,
+                        onDismiss = { menu = false },
+                        onPick = { gid ->
+                            menu = false
+                            onMoveAll(gid)
+                        },
+                    )
+                }
+            }
+        }
+        if (ungrouped && groups.isEmpty() && count > 0) {
+            Text(
+                "想分类的话，先点上排「分组」建一个组，再把它们移进去",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 22.dp, bottom = 2.dp),
+            )
+        }
+    }
+}
+
+/** 分组下拉菜单：未分组 + 所有组 */
+@Composable
+private fun GroupMenu(
+    expanded: Boolean,
+    groups: List<ModGroup>,
+    onDismiss: () -> Unit,
+    onPick: (String?) -> Unit,
+    showUngrouped: Boolean = true,
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        if (showUngrouped) {
+            DropdownMenuItem(
+                text = { Text(ModGroups.UNGROUPED) },
+                onClick = { onPick(null) },
+            )
+        }
+        groups.forEach { g ->
+            DropdownMenuItem(
+                text = { Text(g.name) },
+                onClick = { onPick(g.id) },
+            )
+        }
+    }
+}
+
+/** 多选模式下贴底的操作条：全选 / 整体移动到某个组 / 取消 */
+@Composable
+private fun SelectionBar(
+    count: Int,
+    total: Int,
+    groups: List<ModGroup>,
+    onSelectAll: () -> Unit,
+    onMove: (String?) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var menu by remember { mutableStateOf(false) }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        tonalElevation = 3.dp,
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("已选 $count", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = onSelectAll,
+                contentPadding = PaddingValues(horizontal = 8.dp),
+            ) {
+                Text(
+                    if (count == total && total > 0) "取消全选" else "全选",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+            Box {
+                Button(
+                    onClick = { menu = true },
+                    enabled = count > 0,
+                    shape = RoundedCornerShape(50),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                ) {
+                    Text("移动到", style = MaterialTheme.typography.labelMedium)
+                }
+                GroupMenu(
+                    expanded = menu,
+                    groups = groups,
+                    onDismiss = { menu = false },
+                    onPick = { gid ->
+                        menu = false
+                        onMove(gid)
+                    },
+                )
+            }
+            TextButton(
+                onClick = onCancel,
+                contentPadding = PaddingValues(horizontal = 8.dp),
+            ) {
+                Text("取消", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    }
+}
+
+/** 单个 mod 换组（mod 详情面板里用） */
+@Composable
+private fun GroupPicker(current: String, groups: List<ModGroup>, onPick: (String?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val label = groups.firstOrNull { it.id == current }?.name ?: ModGroups.UNGROUPED
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "分组",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.weight(1f))
+        Box {
+            TextButton(onClick = { open = true }) { Text(label) }
+            GroupMenu(
+                expanded = open,
+                groups = groups,
+                onDismiss = { open = false },
+                onPick = { gid ->
+                    open = false
+                    onPick(gid)
+                },
+            )
+        }
+    }
+}
+
+/** 分组管理：新建 / 改名 / 删除 / 未分组批量迁移 */
+@Composable
+private fun GroupManagerDialog(
+    groups: List<ModGroup>,
+    modCounts: Map<String, Int>,
+    ungrouped: List<String>,
+    onCreate: (String) -> Boolean,
+    onRename: (String, String) -> Boolean,
+    onDelete: (String) -> Unit,
+    onMoveGroup: (Int, Int) -> Unit,
+    onMoveAll: (List<String>, String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var newName by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var renaming by remember { mutableStateOf<ModGroup?>(null) }
+    var deleteTarget by remember { mutableStateOf<ModGroup?>(null) }
+    var moveMenu by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("分组管理") },
+        text = {
+            Column(
+                Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    "分组只是启动器里的分类，不会动 mods 里的文件夹，游戏照旧读取。" +
+                        "列表里长按某个 mod 可以拖动排序。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = {
+                            newName = it
+                            error = null
+                        },
+                        label = { Text("新分组名称") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            if (onCreate(newName)) {
+                                newName = ""
+                                error = null
+                            } else {
+                                error = "名字为空或已经有同名分组"
+                            }
+                        },
+                        enabled = newName.isNotBlank(),
+                    ) { Text("创建") }
+                }
+                error?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                if (groups.isEmpty()) {
+                    Text(
+                        "还没有分组，先建一个，再回列表里把 mod 移进去",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                groups.forEachIndexed { index, g ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            g.name,
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            "${modCounts[g.id] ?: 0} 个",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        IconButton(
+                            onClick = { onMoveGroup(index, index - 1) },
+                            enabled = index > 0,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(Icons.Filled.KeyboardArrowUp, "上移", Modifier.size(16.dp))
+                        }
+                        IconButton(
+                            onClick = { onMoveGroup(index, index + 1) },
+                            enabled = index < groups.lastIndex,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(Icons.Filled.KeyboardArrowDown, "下移", Modifier.size(16.dp))
+                        }
+                        IconButton(onClick = { renaming = g }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Filled.Edit, "重命名", Modifier.size(16.dp))
+                        }
+                        IconButton(onClick = { deleteTarget = g }, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                Icons.Filled.Delete,
+                                "删除分组",
+                                Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                }
+                if (ungrouped.isNotEmpty() && groups.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "未分组 ${ungrouped.size} 个 mod",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Box {
+                            TextButton(onClick = { moveMenu = true }) { Text("全部移入…") }
+                            GroupMenu(
+                                expanded = moveMenu,
+                                groups = groups,
+                                showUngrouped = false,
+                                onDismiss = { moveMenu = false },
+                                onPick = { gid ->
+                                    moveMenu = false
+                                    onMoveAll(ungrouped, gid)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+    )
+
+    renaming?.let { g ->
+        NameDialog(
+            title = "重命名分组",
+            initial = g.name,
+            onConfirm = { onRename(g.id, it) },
+            onDismiss = { renaming = null },
+        )
+    }
+
+    deleteTarget?.let { g ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除分组「${g.name}」？") },
+            text = { Text("组里的 mod 不会被删除，只会回到未分组。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDelete(g.id)
+                    deleteTarget = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun NameDialog(
+    title: String,
+    initial: String,
+    onConfirm: (String) -> Boolean,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf(initial) }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = {
+                        text = it
+                        error = null
+                    },
+                    label = { Text("名称") },
+                    singleLine = true,
+                )
+                error?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (onConfirm(text)) onDismiss() else error = "名字为空或已经有同名分组"
+            }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+/**
+ * 长按：拖动了 = 本组内排序；没动就松手 = 进入多选。
+ * 手指滑到哪一行，就把被拖的 mod 插到那一行的位置。
+ */
+private fun Modifier.modDragToSort(
+    modId: String,
+    listState: LazyListState,
+    scope: CoroutineScope,
+    sections: () -> List<ModGroups.Section>,
+    onReorder: (String?, List<String>) -> Unit,
+    onDragState: (Boolean) -> Unit,
+    onHold: () -> Unit,
+): Modifier = this.pointerInput(modId) {
+    var pointerY = 0f
+    var moved = 0f
+    detectDragGesturesAfterLongPress(
+        onDragStart = { offset ->
+            val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == "mod:$modId" }
+            pointerY = (info?.offset ?: 0) + offset.y
+            moved = 0f
+            onDragState(true)
+        },
+        onDragEnd = {
+            onDragState(false)
+            if (moved < 24f) onHold()
+        },
+        onDragCancel = { onDragState(false) },
+        onDrag = { change, amount ->
+            change.consume()
+            moved += kotlin.math.abs(amount.x) + kotlin.math.abs(amount.y)
+            pointerY += amount.y
+            if (moved >= 24f) {
+                // 拖到列表上下边缘时自动滚动，长列表也能一路拖到底
+                val info = listState.layoutInfo
+                val edge = 96f
+                when {
+                    pointerY < info.viewportStartOffset + edge ->
+                        scope.launch { listState.scrollBy(-14f) }
+
+                    pointerY > info.viewportEndOffset - edge ->
+                        scope.launch { listState.scrollBy(14f) }
+                }
+                val hovered = (info.visibleItemsInfo
+                    .firstOrNull { pointerY >= it.offset && pointerY <= it.offset + it.size }
+                    ?.key as? String)
+                    ?.takeIf { it.startsWith("mod:") }
+                    ?.removePrefix("mod:")
+                if (hovered != null && hovered != modId) {
+                    val section = sections().firstOrNull { s -> s.mods.any { it.id == modId } }
+                    if (section != null && section.mods.any { it.id == hovered }) {
+                        val ids = section.mods.map { it.id }.toMutableList()
+                        val from = ids.indexOf(modId)
+                        val to = ids.indexOf(hovered)
+                        if (from >= 0 && to >= 0) {
+                            ids.add(to, ids.removeAt(from))
+                            onReorder(section.group?.id, ids)
+                        }
+                    }
+                }
+            }
+        },
     )
 }
 
