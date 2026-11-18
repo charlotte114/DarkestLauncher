@@ -84,6 +84,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
@@ -93,10 +94,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -115,7 +118,9 @@ import moe.ddlauncher.ModRepo
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -572,8 +577,11 @@ private fun GameCard(
                 )
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    if (packInstalled) "数据包 ${DataPack.gb(packSize)} · $version"
-                    else "数据包未导入，点下面导入一次",
+                    when {
+                        !packInstalled -> "数据包未导入，点下面导入一次"
+                        packSize <= 0L -> "数据包已导入 · 正在统计容量"
+                        else -> "数据包 ${DataPack.gb(packSize)} · $version"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = HeroSub,
                 )
@@ -687,12 +695,14 @@ private fun SummaryRow(
 ) {
     val enabled = mods.count { it.enabled }
     val allOn = mods.isNotEmpty() && enabled == mods.size
-    val total = mods.sumOf { it.sizeBytes }
+    // sizeBytes < 0 表示后台还没统计完
+    val pending = mods.any { it.sizeBytes < 0 }
+    val total = mods.sumOf { if (it.sizeBytes > 0) it.sizeBytes else 0L }
 
     Column {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatPill("已启用", "$enabled / ${mods.size}", Modifier.weight(1f))
-            StatPill("总体积", humanSize(total), Modifier.weight(1f))
+            StatPill("总体积", if (pending) "统计中" else humanSize(total), Modifier.weight(1f))
             StatPill(
                 label = "冲突",
                 value = "${conflicts.size}",
@@ -876,7 +886,8 @@ private fun ModRow(
                     else -> "进游戏时转换"
                 }
                 Text(
-                    "$state · ${mod.fileCount} 文件 · ${humanSize(mod.sizeBytes)}",
+                    if (mod.fileCount < 0) state
+                    else "$state · ${mod.fileCount} 文件 · ${humanSize(mod.sizeBytes)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (!mod.enabled) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     else if (mod.prepared) MaterialTheme.colorScheme.primary
@@ -903,16 +914,43 @@ private fun ModRow(
     }
 }
 
+/**
+ * 只解码到需要的尺寸：先读图片头拿到宽高，算一个 2 的幂次采样率再真解码。
+ * 直接用 decodeFile 读 1024×1024 的预览图，每张要占 4 MB，几十张一起就是几百 MB 的 GC 压力。
+ * .dds 是引擎的格式，Android 解不了，直接放弃（省一次无效 IO）。
+ */
+private fun decodeSampledIcon(file: File, targetPx: Int): ImageBitmap? {
+    if (!file.isFile) return null
+    if (file.name.endsWith(".dds", ignoreCase = true)) return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= targetPx && bounds.outHeight / (sample * 2) >= targetPx) {
+        sample *= 2
+    }
+    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeFile(file.absolutePath, opts)?.asImageBitmap()
+}
+
 @Composable
 private fun ModIcon(file: File?, name: String, size: Int = 52) {
-    val bitmap = remember(file?.absolutePath, file?.lastModified(), file?.length()) {
-        file?.takeIf { it.isFile }?.let {
-            runCatching { BitmapFactory.decodeFile(it.absolutePath) }.getOrNull()
+    // 图标后台解码 + 按显示尺寸采样。
+    // 以前是 remember { BitmapFactory.decodeFile(...) }：在组合阶段同步全尺寸解码，
+    // 34 个 mod 一进列表就要在 UI 线程上解几十张大图，首帧直接卡住。
+    val density = LocalDensity.current
+    val targetPx = with(density) { (size * 2).dp.roundToPx() } // 2 倍留点余量，缩放不糊
+    val bitmap by produceState<ImageBitmap?>(
+        initialValue = null,
+        file?.absolutePath, file?.lastModified(), file?.length(), targetPx,
+    ) {
+        value = if (file == null) null else withContext(Dispatchers.IO) {
+            runCatching { decodeSampledIcon(file, targetPx) }.getOrNull()
         }
     }
     if (bitmap != null) {
         Image(
-            bitmap.asImageBitmap(),
+            bitmap!!,
             contentDescription = null,
             modifier = Modifier.size(size.dp).clip(RoundedCornerShape(10.dp)),
             contentScale = ContentScale.Crop,
@@ -1009,7 +1047,10 @@ private fun ModSheet(
 
             Spacer(Modifier.height(16.dp))
             InfoLine("目录", mod.id)
-            InfoLine("文件", "${mod.fileCount} 个 · ${humanSize(mod.sizeBytes)}")
+            InfoLine(
+                "文件",
+                if (mod.fileCount < 0) "统计中…" else "${mod.fileCount} 个 · ${humanSize(mod.sizeBytes)}",
+            )
             if (mod.language.isNotBlank()) InfoLine("语言", mod.language)
             InfoLine(
                 "状态",

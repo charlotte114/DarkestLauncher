@@ -28,6 +28,13 @@ class ModRepo {
         if (!noMedia.exists()) runCatching { noMedia.createNewFile() }
     }
 
+    /**
+     * 只读元数据（project.xml、图标是否存在、开关状态），不遍历 mod 里的文件。
+     *
+     * 每个 mod 少则几十、多则上千个文件，在 Android 的外部存储上每次 stat 都要过 FUSE，
+     * 34 个 mod 走一圈接近 1 秒 —— 那是首屏「卡一下」的另一半原因。
+     * 文件数和体积交给 [analyze] 在后台补，界面上先显示「统计中」。
+     */
     fun scan(): List<ModInfo> {
         val root = Game.modsDir()
         if (!root.isDirectory) return emptyList()
@@ -78,12 +85,9 @@ class ModRepo {
                 .firstOrNull { it.isFile }
         }
 
-        var files = 0
-        var bytes = 0L
-        walk(dir) { f ->
-            files++
-            bytes += f.length()
-        }
+        // 文件数和体积留给 analyze() 在后台补（-1 = 还没统计），别在这里遍历目录
+        val files = -1
+        val bytes = -1L
 
         return ModInfo(
             dir = dir,
@@ -133,13 +137,32 @@ class ModRepo {
      * 跨 mod 覆盖冲突：DD 没有加载顺序，两个 mod 改同一个文件时谁生效是随机的。
      * .darkest / .json 是数据（会影响玩法），其余算资源。
      */
-    fun conflicts(mods: List<ModInfo>): List<Conflict> {
+    fun conflicts(mods: List<ModInfo>): List<Conflict> = analyze(mods).conflicts
+
+    data class Stats(val files: Int, val bytes: Long)
+
+    data class Analysis(
+        /** mod id → 文件数 / 体积 */
+        val stats: Map<String, Stats>,
+        val conflicts: List<Conflict>,
+    )
+
+    /**
+     * 一次遍历同时得到「每个 mod 的文件数和体积」和「跨 mod 冲突」。
+     * 原来 scan() 走一遍统计、conflicts() 再走一遍找冲突，同样 2800 个文件要 stat 两次。
+     */
+    fun analyze(mods: List<ModInfo>): Analysis {
+        val stats = HashMap<String, Stats>(mods.size * 2)
         val owners = HashMap<String, MutableList<String>>()
         val data = HashMap<String, Boolean>()
 
         for (m in mods) {
-            if (!m.enabled) continue
+            var files = 0
+            var bytes = 0L
             walk(m.dir) { f ->
+                files++
+                bytes += f.length()
+                if (!m.enabled) return@walk
                 val rel = relative(m.dir, f) ?: return@walk
                 val lower = rel.lowercase(Locale.ROOT)
                 val leaf = lower.substringAfterLast('/')
@@ -147,15 +170,19 @@ class ModRepo {
                 if (lower.startsWith(".port-") || lower.contains("/.port-")) return@walk
                 if (leaf.startsWith("._") || leaf == ".ds_store" || leaf == "thumbs.db") return@walk
                 if (lower.endsWith(".md") || lower.endsWith(".txt")) return@walk
-                owners.getOrPut(lower) { ArrayList() }.let { if (!it.contains(m.displayName)) it.add(m.displayName) }
+                owners.getOrPut(lower) { ArrayList() }
+                    .let { if (!it.contains(m.displayName)) it.add(m.displayName) }
                 data[lower] = lower.endsWith(".darkest") || lower.endsWith(".json")
             }
+            stats[m.id] = Stats(files, bytes)
         }
 
-        return owners.entries
+        val conflicts = owners.entries
             .filter { it.value.size > 1 }
             .map { Conflict(it.key, it.value.sorted(), data[it.key] == true) }
             .sortedWith(compareByDescending<Conflict> { it.mods.size }.thenBy { it.path })
+
+        return Analysis(stats, conflicts)
     }
 
     // ---- 文件树工具 ----

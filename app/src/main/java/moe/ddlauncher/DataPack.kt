@@ -27,6 +27,12 @@ object DataPack {
 
     /** 导入时顺手把包里的 AndroidManifest.xml 存一份（几 KB），以后能重新解析版本 */
     private const val MANIFEST_FILE = "pack-manifest.xml"
+
+    /**
+     * 数据包占用的空间。导入时就把解出来的字节数记下来，启动时直接读这个数，
+     * 不用再遍历上万个文件 —— 那是首屏卡一下的主要原因。
+     */
+    private const val SIZE_FILE = "pack-size.txt"
     private val TOP_DIRS = listOf("exefs", "romfs", "aoc", "overlay", "overlay_ru", "mods")
 
     fun dir(context: Context): File = File(context.getExternalFilesDir(null), "nx")
@@ -73,6 +79,18 @@ object DataPack {
         var total = 0L
         for (name in TOP_DIRS) total += treeSize(File(root, name))
         return total
+    }
+
+    /** 上次算好/导入时记下的容量，没有就 0（交给后台补算） */
+    fun cachedSize(context: Context): Long {
+        val f = File(dir(context), SIZE_FILE)
+        if (!f.isFile) return 0L
+        return runCatching { f.readText().trim().toLong() }.getOrDefault(0L)
+    }
+
+    fun storeSize(context: Context, bytes: Long) {
+        if (bytes <= 0) return
+        runCatching { File(dir(context), SIZE_FILE).writeText(bytes.toString()) }
     }
 
     private fun treeSize(root: File): Long {
@@ -280,6 +298,7 @@ object DataPack {
         // 清单存一份：以后解析器有改进，不用重新导入几 GB 也能把版本纠正过来
         writeManifest(context, manifest)
         writeVersion(context, ver)
+        storeSize(context, bytes)
         DdLog.i(
             context, "pack",
             "导入完成 entries=$entries 清单=${manifest?.size ?: 0}B 版本=${ver ?: "未识别"} 文件名=$sourceName"
@@ -321,6 +340,7 @@ object DataPack {
         }
         File(root, VERSION_FILE).delete()
         File(root, MANIFEST_FILE).delete()
+        File(root, SIZE_FILE).delete()
         return ok
     }
 

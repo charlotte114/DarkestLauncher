@@ -62,7 +62,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = ModRepo()
     private val importer = ZipImport(repo)
     private val groupStore = ModGroups(app)
-    private var cachedPackSize = -1L
 
     init {
         // 加速通道需要 Context 拿开关和日志；失败就静默退回直连
@@ -79,43 +78,104 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             PackageManager.PERMISSION_GRANTED
     }
 
+    /**
+     * 启动时的加载分两段，先出界面再补细节：
+     *  1) 快：扫 mods 目录、读分组、读版本记录、读缓存的容量 —— 只碰几百个小文件，几十毫秒；
+     *  2) 慢：容量兜底统计（遍历上万个文件）、版本补齐（可能要翻 Download 里的几 GB 包）——
+     *     这些放到界面出来之后再跑，别挡着列表显示。
+     * 以前这两段是一个事务，慢的那步会把 mod 列表和数据包卡片一起拖住，看起来就是「启动卡一下」。
+     */
     fun refresh() {
         viewModelScope.launch {
-            val access = hasStorageAccess()
             val ctx = getApplication<Application>()
+            val access = hasStorageAccess()
             _state.update { it.copy(hasAccess = access, loading = true, versionName = versionName()) }
             if (!access) {
                 _state.update { it.copy(loading = false, mods = emptyList(), conflicts = emptyList(), sections = emptyList()) }
                 return@launch
             }
-            val result = withContext(Dispatchers.IO) {
+
+            val t0 = android.os.SystemClock.elapsedRealtime()
+            val fast = withContext(Dispatchers.IO) {
                 repo.ensureDir()
                 val mods = repo.scan()
                 val installed = DataPack.isInstalled(ctx)
-                val size = if (!installed) 0L else {
-                    if (cachedPackSize > 0) cachedPackSize else DataPack.sizeOf(ctx).also { cachedPackSize = it }
-                }
                 ScanResult(
                     mods = mods,
-                    conflicts = repo.conflicts(mods),
+                    conflicts = emptyList(), // 后台 analyze 补
                     installed = installed,
-                    size = size,
-                    version = if (installed) {
-                        DataPack.version(ctx) ?: DataPack.recoverVersion(ctx)
-                    } else null,
+                    // 导入时记下的数；没有就先用 0，界面显示「容量统计中」，后台补
+                    size = if (installed) DataPack.cachedSize(ctx) else 0L,
+                    version = if (installed) DataPack.version(ctx) else null,
                     groups = groupStore.also { it.invalidate() }.snapshot(),
                 )
             }
             _state.update {
                 it.copy(
                     loading = false,
-                    mods = result.mods,
-                    conflicts = result.conflicts,
-                    packInstalled = result.installed,
-                    packSize = result.size,
-                    gameVersion = result.version,
-                    groups = result.groups,
-                    sections = result.groups.arrange(result.mods),
+                    mods = fast.mods,
+                    conflicts = fast.conflicts,
+                    packInstalled = fast.installed,
+                    packSize = fast.size,
+                    gameVersion = fast.version,
+                    groups = fast.groups,
+                    sections = fast.groups.arrange(fast.mods),
+                )
+            }
+            DdLog.i(
+                ctx, "perf",
+                "首屏 ${android.os.SystemClock.elapsedRealtime() - t0}ms mods=${fast.mods.size} " +
+                    "pack=${fast.installed}"
+            )
+            // 文件数、体积、跨 mod 冲突：要挨个 stat 几千个文件，放到界面出来之后再算。
+            // 算完按 id 贴回当前列表，中途用户切了开关也不会错位。
+            if (fast.mods.isNotEmpty()) {
+                val analysis = withContext(Dispatchers.IO) {
+                    runCatching { repo.analyze(fast.mods) }.getOrNull()
+                }
+                if (analysis != null) {
+                    _state.update { ui ->
+                        val patched = ui.mods.map { mod ->
+                            val s = analysis.stats[mod.id] ?: return@map mod
+                            mod.copy(fileCount = s.files, sizeBytes = s.bytes)
+                        }
+                        ui.copy(
+                            mods = patched,
+                            conflicts = analysis.conflicts,
+                            sections = ui.groups.arrange(patched),
+                        )
+                    }
+                    DdLog.i(
+                        ctx, "perf",
+                        "mod 统计 +${android.os.SystemClock.elapsedRealtime() - t0}ms " +
+                            "conflicts=${analysis.conflicts.size}"
+                    )
+                }
+            }
+
+            if (!fast.installed) return@launch
+            // 容量：有记录就不再扫；没有才统计一次，统计完顺手存下来
+            if (fast.size <= 0) {
+                val size = withContext(Dispatchers.IO) { DataPack.sizeOf(ctx) }
+                if (size > 0) {
+                    DataPack.storeSize(ctx, size)
+                    _state.update { it.copy(packSize = size) }
+                }
+                DdLog.i(
+                    ctx, "perf",
+                    "容量统计 +${android.os.SystemClock.elapsedRealtime() - t0}ms size=$size"
+                )
+            }
+
+            // 版本：只有在完全没有记录时才去 Download 里翻包，翻到了再补上
+            if (fast.version == null) {
+                val ver = withContext(Dispatchers.IO) {
+                    runCatching { DataPack.recoverVersion(ctx) }.getOrNull()
+                }
+                if (ver != null) _state.update { it.copy(gameVersion = ver) }
+                DdLog.i(
+                    ctx, "perf",
+                    "版本补齐 +${android.os.SystemClock.elapsedRealtime() - t0}ms ver=${ver ?: "无"}"
                 )
             }
         }
@@ -173,7 +233,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            cachedPackSize = -1
             _state.update { it.copy(packProgress = null) }
             note("数据包：${result.message}")
             refresh()
@@ -202,7 +261,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val ctx = getApplication<Application>()
             _state.update { it.copy(busy = "正在删除数据包…") }
             val ok = withContext(Dispatchers.IO) { DataPack.remove(ctx) }
-            cachedPackSize = -1
             _state.update { it.copy(busy = null) }
             note(if (ok) "数据包已删除" else "删除未完成")
             refresh()
