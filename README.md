@@ -33,7 +33,7 @@
 `versionName` 保持 `2.2.1`，与内置的游戏运行时一致，避免第三方工具误判版本。
 主界面上的「游戏 x.x.x」不是这个字段，而是**你导入的那份数据包的版本**（导入时读包里的
 `AndroidManifest.xml`，读不到就用文件名猜，再不行显示「版本未知」）。
-启动器自己的版本看设置页：**1.2**。
+启动器自己的版本看设置页：**1.3**。
 
 数据目录随包名走：`/sdcard/Android/data/com.darkestdungeon.launcher/`、`/sdcard/Android/media/com.darkestdungeon.launcher/mods/`，
 与原版游戏完全独立，第一次使用需要重新导入数据包和 mod。

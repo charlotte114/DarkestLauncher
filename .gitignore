@@ -32,3 +32,6 @@ replay_pid*.log
 # 系统垃圾
 .DS_Store
 Thumbs.db
+
+# 逆向分析的临时数据库
+androguard.db

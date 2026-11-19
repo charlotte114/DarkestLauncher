@@ -27,6 +27,8 @@ class ModGroups(context: Context) {
         val order: Map<String, List<String>> = emptyMap(),
         /** 上次在工坊里选的「下载到哪个组」 */
         val downloadTarget: String? = null,
+        /** 真正写进存档的加载顺序（和分组/列表显示顺序无关）；空 = 还没单独排过 */
+        val loadOrder: List<String> = emptyList(),
     ) {
         fun groupOf(modId: String): String = assign[modId].orEmpty()
 
@@ -36,6 +38,19 @@ class ModGroups(context: Context) {
 
         fun exists(groupId: String?): Boolean =
             groupId.isNullOrEmpty() || groups.any { it.id == groupId }
+
+        /**
+         * 有效加载顺序：先按单独保存的 loadOrder，没列到的 mod（新装的、刚启用的）
+         * 按传进来的列表顺序追加在后面。
+         */
+        fun loadOrderOf(mods: List<ModInfo>): List<ModInfo> {
+            val byId = mods.associateBy { it.id }
+            val out = ArrayList<ModInfo>(mods.size)
+            val used = HashSet<String>()
+            for (id in loadOrder) byId[id]?.let { if (used.add(id)) out.add(it) }
+            for (m in mods) if (used.add(m.id)) out.add(m)
+            return out
+        }
 
         /**
          * 按分组切好段落：组按创建顺序，组内按保存的顺序，新加的 mod 追加在后面。
@@ -115,8 +130,13 @@ class ModGroups(context: Context) {
                 for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotBlank() }?.let { ids.add(it) }
                 order[key] = ids
             }
+            val loadJson = root.optJSONArray("loadOrder") ?: JSONArray()
+            val loadOrder = ArrayList<String>()
+            for (i in 0 until loadJson.length()) {
+                loadJson.optString(i).takeIf { it.isNotBlank() }?.let { loadOrder.add(it) }
+            }
             val target = root.optString("download").takeIf { it.isNotBlank() }
-            Snapshot(groups, assign, order, target?.takeIf { id -> groups.any { it.id == id } })
+            Snapshot(groups, assign, order, target?.takeIf { id -> groups.any { it.id == id } }, loadOrder)
         }.getOrElse { Snapshot() }
     }
 
@@ -130,6 +150,7 @@ class ModGroups(context: Context) {
             put("assign", JSONObject().apply { snap.assign.forEach { (k, v) -> put(k, v) } })
             put("order", JSONObject().apply { snap.order.forEach { (k, v) -> put(k, JSONArray(v)) } })
             put("download", snap.downloadTarget ?: "")
+            put("loadOrder", JSONArray(snap.loadOrder))
         }.toString()
         val targets = listOf(primary(), fallback)
         for (f in targets) {
@@ -215,5 +236,11 @@ class ModGroups(context: Context) {
     fun setDownloadTarget(groupId: String?) {
         val snap = snapshot()
         save(snap.copy(downloadTarget = groupId?.takeIf { snap.exists(it) && it.isNotEmpty() }))
+    }
+
+    /** 单独排的加载顺序（启动游戏时写进存档的就是它） */
+    fun setLoadOrder(ids: List<String>) {
+        val snap = snapshot()
+        save(snap.copy(loadOrder = ids.filter { it.isNotBlank() }.distinct()))
     }
 }

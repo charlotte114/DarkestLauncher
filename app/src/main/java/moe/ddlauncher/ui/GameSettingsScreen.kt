@@ -22,6 +22,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -36,6 +37,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,7 +48,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import moe.ddlauncher.AppViewModel
+import moe.ddlauncher.GameFont
 import moe.ddlauncher.GameOptions
+import android.content.Context
+import android.os.Build
+import android.util.DisplayMetrics
+import android.view.WindowManager
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -71,14 +78,33 @@ fun GameSettingsScreen(
     onSaveRaw: (String) -> Unit,
     onRestoreLatest: () -> Unit,
     onDump: () -> Unit,
+    onSetIntroSkip: (Boolean) -> Unit,
+    onSetFont: (Int) -> Unit,
 ) {
     val ctx = LocalContext.current
     var showRaw by remember { mutableStateOf(false) }
     val edits = remember { mutableStateMapOf<String, String>() }
 
-    // 分辨率预设：只给 16:9 的几档（游戏引擎内部按 16:9 画，别的比例铺不满、只会变形）
+    // 分辨率预设：16:9 几档 + 设备真实屏幕分辨率（引擎 view 尺寸跟它走，
+    // 长屏机器想要铺满全屏就去掉黑边，选原生那一档）
     val presets = remember {
-        listOf("1920x1080", "2560x1440", "1600x900", "1280x720", "1024x576")
+        val base = listOf("1920x1080", "2560x1440", "1600x900", "1280x720", "1024x576")
+        val native = runCatching {
+            val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val b = if (Build.VERSION.SDK_INT >= 30) {
+                wm.maximumWindowMetrics.bounds
+            } else {
+                @Suppress("DEPRECATION")
+                val dm = DisplayMetrics()
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.getRealMetrics(dm)
+                android.graphics.Rect(0, 0, dm.widthPixels, dm.heightPixels)
+            }
+            val w = maxOf(b.width(), b.height())
+            val h = minOf(b.width(), b.height())
+            if (w > 0 && h > 0) "${w}x${h}" else null
+        }.getOrNull()
+        (listOfNotNull(native) + base).distinct()
     }
     val presetLabels = remember { emptyMap<String, String>() }
 
@@ -134,6 +160,18 @@ fun GameSettingsScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item { InfoCard(state, onReload, onDump, onRestoreLatest, onShowRaw = { showRaw = true }) }
+            item {
+                IntroSkipCard(
+                    state = state,
+                    onToggle = onSetIntroSkip,
+                )
+            }
+            item {
+                FontCard(
+                    state = state,
+                    onSetFont = onSetFont,
+                )
+            }
 
             state.error?.let { err ->
                 item {
@@ -207,6 +245,125 @@ fun GameSettingsScreen(
                 onSaveRaw(it)
             },
         )
+    }
+}
+
+@Composable
+private fun FontCard(
+    state: AppViewModel.Opts,
+    onSetFont: (Int) -> Unit,
+) {
+    val enabled = state.font.available && !state.fontBusy
+    var draft by remember(state.font.percent) {
+        mutableFloatStateOf(state.font.percent.toFloat())
+    }
+    Card {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("游戏字体大小", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (state.font.available) "只改游戏内文本，下次启动生效" else "先导入数据包",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    "${draft.roundToInt()}%",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+
+            Slider(
+                value = draft,
+                onValueChange = { draft = it },
+                onValueChangeFinished = {
+                    val pct = GameFont.normalize(draft.roundToInt())
+                    if (pct != state.font.percent) onSetFont(pct)
+                },
+                valueRange = GameFont.MIN.toFloat()..GameFont.MAX.toFloat(),
+                steps = (GameFont.MAX - GameFont.MIN) / GameFont.STEP - 1,
+                enabled = enabled,
+            )
+            Row(Modifier.fillMaxWidth()) {
+                Text("小", style = MaterialTheme.typography.labelSmall)
+                Spacer(Modifier.weight(1f))
+                Text("标准 100%", style = MaterialTheme.typography.labelSmall)
+                Spacer(Modifier.weight(1f))
+                Text("大", style = MaterialTheme.typography.labelSmall)
+            }
+            Text(
+                "生成一套独立字体，不改原版文件；调大后个别长文本可能换行更多。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+
+            if (state.fontBusy) {
+                LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 10.dp))
+                Text(
+                    "正在生成字形图集，字体越多需要的时间越长…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+
+            state.fontMessage?.let { msg ->
+                Text(
+                    msg,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+
+            if (state.font.percent != GameFont.NORMAL && enabled) {
+                TextButton(
+                    onClick = { onSetFont(GameFont.NORMAL) },
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                ) {
+                    Text("恢复原版字体")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IntroSkipCard(
+    state: AppViewModel.Opts,
+    onToggle: (Boolean) -> Unit,
+) {
+    Card {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("跳过开屏动画", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    when {
+                        !state.introSkipAvailable ->
+                            "没找到数据包里的开屏视频，先导入数据包"
+                        state.introSkipEnabled ->
+                            "已用 0.5 秒黑屏替换 house_of_ruin / old_road 片头。关闭后恢复原视频。"
+                        else ->
+                            "跳过 house_of_ruin 和 old_road 两段片头，保留正常主菜单和语言。"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = state.introSkipEnabled,
+                enabled = state.introSkipAvailable && !state.saving,
+                onCheckedChange = onToggle,
+            )
+        }
     }
 }
 

@@ -51,9 +51,12 @@ data class ModInfo(
     val sizeBytes: Long,
     val modified: Long,
     val notes: List<String>,
+    val customName: String = "",
 ) {
     val id: String get() = dir.name
-    val displayName: String get() = title.ifBlank { dir.name }
+    val originalName: String get() = title.trim().ifBlank { dir.name }
+    val displayName: String get() = customName.trim().ifBlank { originalName }
+    val hasCustomName: Boolean get() = customName.trim().isNotBlank() && customName.trim() != originalName
 }
 
 data class GameInfo(

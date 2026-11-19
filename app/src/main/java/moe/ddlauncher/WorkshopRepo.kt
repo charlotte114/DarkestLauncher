@@ -37,12 +37,18 @@ object WorkshopRepo {
      * OkHttp 默认会协商 h2，握手会一直挂着（表现为「登录中…」卡死）。
      * 上游的 newDefaultOkHttpClient() 就是靠 applySteamHttpCompatibility() 设这一项。
      */
-    private val client = OkHttpClient.Builder()
-        .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .build()
+    private val client: OkHttpClient by lazy {
+        WattAccelerator.decorate(
+            OkHttpClient.Builder()
+                .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+                // 和上游 newDefaultOkHttpClient() 对齐。WebSocket 握手另有 8 秒上限，
+                // 这里压到 30 秒是为了单次查询失败后能尽快换节点，而不是干等一分钟。
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .writeTimeout(30, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+        ).build()
+    }
 
     /**
      * 纯 Web API 用的客户端。这网络下 `api.steampowered.com` 解析出的 8 个 Akamai IP 里常有
@@ -50,16 +56,16 @@ object WorkshopRepo {
      * 单次失败几秒内就能换下一条。CM WebSocket 和 CDN 下载仍用 [client]（要长连接）。
      */
     private val apiClient: OkHttpClient by lazy {
-        WattAccelerator.decorate(
-            client.newBuilder()
-                // 连接超时压到 4 秒很关键：一个域名解析出 8 个 IP，OkHttp 是挨个试的，
-                // 每个黑洞 IP 卡 8 秒的话一次查询就废了；4 秒能让它在 callTimeout 内换掉好几个。
-                .connectTimeout(4, TimeUnit.SECONDS)
-                .readTimeout(12, TimeUnit.SECONDS)
-                .writeTimeout(12, TimeUnit.SECONDS)
-                .callTimeout(40, TimeUnit.SECONDS)
-                .retryOnConnectionFailure(true)
-        ).build()
+        client.newBuilder()
+            // 加速拦截器已经挂在 [client] 上，这里 newBuilder() 会继承，不要重复挂。
+            // 连接超时压到 4 秒很关键：一个域名解析出 8 个 IP，OkHttp 是挨个试的，
+            // 每个黑洞 IP 卡 8 秒的话一次查询就废了；4 秒能让它在 callTimeout 内换掉好几个。
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(12, TimeUnit.SECONDS)
+            .writeTimeout(12, TimeUnit.SECONDS)
+            .callTimeout(40, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
     }
 
     /**

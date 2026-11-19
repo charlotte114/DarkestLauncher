@@ -53,8 +53,10 @@ object ProjectXml {
      * 逐字段抽取，而不是「匹配任意标签」：
      * 外层 <project> 会把整个文件包住，通用的 <tag>...</tag> 正则会把内容全吞掉。
      */
-    private fun tag(text: String, name: String): String =
-        Regex("<$name>([\\s\\S]*?)</$name>").find(text)?.groupValues?.get(1)?.trim().orEmpty()
+    private fun tagRaw(text: String, name: String): String =
+        Regex("<$name>([\\s\\S]*?)</$name>").find(text)?.groupValues?.get(1).orEmpty()
+
+    private fun tag(text: String, name: String): String = tagRaw(text, name).trim()
 
     fun meta(text: String): Meta {
         val tags = TAGS_BLOCK.findAll(text)
@@ -75,7 +77,12 @@ object ProjectXml {
         val icon = tag(text, "PreviewIconFile").takeIf { it.isNotEmpty() }
 
         return Meta(
-            title = unescape(tag(text, "Title")).replace("\n", " ").trim(),
+            // 游戏按 project.xml 里的原始 Title 登记 mod，末尾空格也不能丢；
+            // 之前这里 trim() 会让带尾空格的 mod 在存档里匹配不上。
+            title = unescape(tagRaw(text, "Title"))
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .replace('\n', ' '),
             version = version,
             workshopId = tag(text, "PublishedFileId").takeUnless { it == "0" || it.isBlank() } ?: "",
             language = tag(text, "Language"),

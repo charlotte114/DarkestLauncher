@@ -16,16 +16,20 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
-        const val LAUNCHER_VERSION = "1.2"
+        const val LAUNCHER_VERSION = "1.3"
 
-        /** 搜索硬超时：网络卡住时 30 秒内必须有结果或报错，别一直转圈 */
-        private const val SEARCH_TIMEOUT_MS = 30_000L
+        /**
+         * 搜索硬超时。正常网络 1~3 秒就出结果；这个上限只兜「CM 两次重连 + 网页兜底」的
+         * 最坏情况——压到 30 秒会把兜底请求从中间掐断，反而变成「明明上游能搜到，这里报错」。
+         */
+        private const val SEARCH_TIMEOUT_MS = 45_000L
     }
 
     data class Ui(
@@ -40,6 +44,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val versionName: String = "",
         /** 已导入数据包对应的游戏版本（2.2.1 / 2.2.2 …）；读不出来就是 null */
         val gameVersion: String? = null,
+        val launcherUpdate: LauncherUpdate.Status = LauncherUpdate.Status(),
         /** 工坊更新检查：mod 目录名 → 工坊最新 time_updated */
         val updates: Map<String, Long> = emptyMap(),
         val updateBusy: Boolean = false,
@@ -62,6 +67,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = ModRepo()
     private val importer = ZipImport(repo)
     private val groupStore = ModGroups(app)
+    private val aliasStore = ModAliases(app)
 
     init {
         // 加速通道需要 Context 拿开关和日志；失败就静默退回直连
@@ -98,7 +104,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val t0 = android.os.SystemClock.elapsedRealtime()
             val fast = withContext(Dispatchers.IO) {
                 repo.ensureDir()
-                val mods = repo.scan()
+                val aliases = aliasStore.load()
+                val mods = repo.scan().map { mod ->
+                    aliases[mod.id]?.let { mod.copy(customName = it) } ?: mod
+                }
                 val installed = DataPack.isInstalled(ctx)
                 ScanResult(
                     mods = mods,
@@ -197,7 +206,137 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun versionName(): String = "启动器 $LAUNCHER_VERSION"
 
-    /** 一键开启 / 关闭全部 mod（改 project.xml 后缀，进游戏才生效） */
+    fun checkLauncherUpdate() {
+        if (_state.value.launcherUpdate.busy) return
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            _state.update {
+                it.copy(
+                    launcherUpdate = LauncherUpdate.Status(
+                        checking = true,
+                        message = "正在检查 GitHub Releases…",
+                    ),
+                )
+            }
+            val result = withContext(Dispatchers.IO) {
+                runCatching { LauncherUpdate.latest() }
+            }
+            result.onSuccess { release ->
+                val newer = LauncherUpdate.isNewer(release.version, LAUNCHER_VERSION)
+                _state.update {
+                    it.copy(
+                        launcherUpdate = LauncherUpdate.Status(
+                            release = release.takeIf { newer },
+                            message = if (newer) {
+                                "发现新版本 ${release.version}"
+                            } else {
+                                "当前已是最新版本 $LAUNCHER_VERSION"
+                            },
+                        ),
+                    )
+                }
+                DdLog.i(
+                    ctx, "update",
+                    "launcher current=$LAUNCHER_VERSION latest=${release.version} newer=$newer",
+                )
+            }.onFailure { e ->
+                _state.update {
+                    it.copy(
+                        launcherUpdate = LauncherUpdate.Status(
+                            message = "检查更新失败：${FailText.of(e)}",
+                            isError = true,
+                        ),
+                    )
+                }
+                DdLog.e(ctx, "update", e)
+            }
+        }
+    }
+
+    fun downloadLauncherUpdate() {
+        val status = _state.value.launcherUpdate
+        if (status.busy) return
+        val release = status.release ?: return
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val ready = status.readyPath?.let(::File)?.takeIf { it.isFile }
+                ?: LauncherUpdate.cachedFile(ctx, release).takeIf { it.isFile }
+            if (ready != null) {
+                val err = LauncherUpdate.install(ctx, ready)
+                _state.update {
+                    it.copy(
+                        launcherUpdate = it.launcherUpdate.copy(
+                            readyPath = ready.absolutePath,
+                            message = err ?: "已打开系统安装器，按提示完成覆盖安装",
+                            isError = err != null,
+                        ),
+                    )
+                }
+                return@launch
+            }
+
+            _state.update {
+                it.copy(
+                    launcherUpdate = it.launcherUpdate.copy(
+                        downloading = true,
+                        progress = 0,
+                        message = "正在下载 ${release.version}…",
+                        isError = false,
+                    ),
+                )
+            }
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    LauncherUpdate.download(ctx, release) { pct ->
+                        _state.update {
+                            it.copy(
+                                launcherUpdate = it.launcherUpdate.copy(
+                                    progress = pct,
+                                    message = "正在下载 ${release.version}… $pct%",
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+            result.onSuccess { file ->
+                _state.update {
+                    it.copy(
+                        launcherUpdate = it.launcherUpdate.copy(
+                            downloading = false,
+                            progress = 100,
+                            readyPath = file.absolutePath,
+                            message = "下载完成，正在打开安装器…",
+                        ),
+                    )
+                }
+                val err = LauncherUpdate.install(ctx, file)
+                _state.update {
+                    it.copy(
+                        launcherUpdate = it.launcherUpdate.copy(
+                            message = err ?: "已打开系统安装器，按提示完成覆盖安装",
+                            isError = err != null,
+                        ),
+                    )
+                }
+                DdLog.i(ctx, "update", "launcher downloaded ${file.absolutePath}")
+            }.onFailure { e ->
+                _state.update {
+                    it.copy(
+                        launcherUpdate = it.launcherUpdate.copy(
+                            downloading = false,
+                            progress = null,
+                            message = "下载更新失败：${FailText.of(e)}",
+                            isError = true,
+                        ),
+                    )
+                }
+                DdLog.e(ctx, "update", e)
+            }
+        }
+    }
+
+    /** 一键开启 / 关闭全部 mod（改 project.xml 后缀，启动游戏时同步进存档） */
     fun setAllMods(enabled: Boolean) {
         val targets = _state.value.mods.filter { it.enabled != enabled }
         if (targets.isEmpty()) {
@@ -216,7 +355,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             DdLog.i(ctx, "mods", "setAll enabled=$enabled total=${targets.size} failed=$failed")
             refresh()
             note(
-                if (failed == 0) "已${if (enabled) "开启" else "关闭"} ${targets.size} 个 mod（进游戏生效）"
+                if (failed == 0) "已${if (enabled) "开启" else "关闭"} ${targets.size} 个 mod（启动游戏时自动同步）"
                 else "有 $failed 个没改成，可能目录被占用"
             )
         }
@@ -273,7 +412,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val name = info.displayName
             note(
                 if (ok) {
-                    if (enabled) "已启用 $name（进游戏生效）" else "已禁用 $name（进游戏生效）"
+                    if (enabled) "已启用 $name（启动游戏时自动同步）" else "已禁用 $name（启动游戏时自动同步）"
                 } else "改名失败：目录可能被占用"
             )
             refresh()
@@ -284,10 +423,34 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _state.update { it.copy(busy = "正在删除 ${info.displayName}") }
             val ok = withContext(Dispatchers.IO) { repo.delete(info) }
+            if (ok) aliasStore.remove(info.id)
             _state.update { it.copy(busy = null) }
             note(if (ok) "已删除 ${info.displayName}" else "删除不完整，可能有文件被占用")
             refresh()
         }
+    }
+
+    /**
+     * 只改启动器里的显示名称。空名称会删除自定义项，回到 project.xml 的原名。
+     * mod 文件夹名和存档里的 Title 都不动，避免破坏加载顺序和游戏识别。
+     */
+    fun renameMod(id: String, name: String): Boolean {
+        val mod = _state.value.mods.firstOrNull { it.id == id } ?: return false
+        val clean = ModAliases.normalize(name)
+        val alias = if (clean.isBlank() || clean == mod.originalName) "" else clean
+        val ok = aliasStore.set(id, alias)
+        if (!ok) {
+            note("保存自定义名称失败：$id")
+            return false
+        }
+        _state.update { ui ->
+            val mods = ui.mods.map {
+                if (it.id == id) it.copy(customName = alias) else it
+            }
+            ui.copy(mods = mods, sections = ui.groups.arrange(mods))
+        }
+        note("自定义名称 ${mod.originalName} -> ${alias.ifBlank { mod.originalName }}", "mods")
+        return true
     }
 
     // ---------------- 自定义分组 ----------------
@@ -332,6 +495,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setDownloadGroup(groupId: String?) {
         groupStore.setDownloadTarget(groupId)
+        syncGroups()
+    }
+
+    /** 单独的加载顺序：只影响写进存档的优先级，不影响列表分组 */
+    fun setLoadOrder(ids: List<String>) {
+        groupStore.setLoadOrder(ids)
         syncGroups()
     }
 
@@ -1072,6 +1241,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * 一次联网搜索，三条通道按优先级：
+     *  1. 已登录 → CM `PublishedFile.QueryFiles#1`（只依赖 refresh token）
+     *  2. 填了 API Key → 公开 Web API
+     *  3. 都没有 → 匿名 CM
+     *
+     * CM / Web API 失败后统一退回爬 `steamcommunity.com/workshop/browse/`，这正是上游
+     * `browseWorkshopPageWithAuthenticatedFallback` 的做法：登录态也有网页兜底。
+     * 这里以前只在匿名时兜底，登录后 CM 一抖整页就直接报错。
+     */
+    private suspend fun searchWorkshopOnce(
+        account: SteamAuth.Account?,
+        key: String,
+        text: String,
+        page: Int,
+        sort: WorkshopCatalog.Sort,
+        queryTypeOverride: Int? = null,
+        days: Int = 0,
+    ): WorkshopRepo.SubscriptionPage {
+        val ctx = getApplication<Application>()
+        if (account != null) {
+            return runCatching {
+                retryIo(times = 2) {
+                    WorkshopRepo.searchViaCm(
+                        account.toSession("DD Launcher"), text, page, sort, queryTypeOverride, days,
+                    )
+                }
+            }.recoverCatching { cmErr ->
+                DdLog.i(ctx, "search", "登录态 CM 失败，退回网页抓取：${cmErr.message}")
+                WorkshopBrowseRepo.search(text, page, sort, days = days)
+                    .let { WorkshopRepo.SubscriptionPage(it.items, it.total) }
+            }.getOrThrow()
+        }
+        if (key.isNotEmpty()) {
+            return WorkshopRepo.queryFiles(key, text, page, sort)
+                .let { WorkshopRepo.SubscriptionPage(it, it.size) }
+        }
+        return runCatching {
+            retryIo(times = 2) {
+                WorkshopRepo.searchAnonymousViaCm(text, page, sort, queryTypeOverride, days)
+            }
+        }.recoverCatching { cmErr ->
+            DdLog.i(ctx, "search", "匿名 CM 失败，退回网页抓取：${cmErr.message}")
+            WorkshopBrowseRepo.search(text, page, sort, days = days)
+                .let { WorkshopRepo.SubscriptionPage(it.items, it.total) }
+        }.getOrThrow()
+    }
+
+    /**
      * 搜索整个工坊：公开条目匿名可搜（CM / 网页兜底），登录 / API Key 只是更快的备用链路。
      *
      * 排序策略照搬上游 `searchCurrentGameWorkshop`：
@@ -1100,29 +1317,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val res = runCatching {
                 // 30 秒硬超时：网络卡住时别让用户一直看着转圈
                 withTimeout(SEARCH_TIMEOUT_MS) {
-                    when {
-                        // 登录态走 CM：实测 access_token 不被 IPublishedFileService 接受，别浪费一次请求
-                        account != null ->
-                            // CM 偶尔掉线，搜一次自动重连一次
-                            retryIo(times = 2) {
-                                WorkshopRepo.searchViaCm(
-                                    account.toSession("DD Launcher"), text, page, reqSort,
-                                    days = reqDays,
-                                )
-                            }
-                        key.isNotEmpty() -> WorkshopRepo.queryFiles(key, text, page, reqSort)
-                            .let { WorkshopRepo.SubscriptionPage(it, it.size) }
-                        // 匿名：先用 CM（下载 mod 本来就在用的节点，不需要网页）；CM 不行再退回爬网页
-                        else -> runCatching {
-                            retryIo(times = 2) {
-                                WorkshopRepo.searchAnonymousViaCm(text, page, reqSort, days = reqDays)
-                            }
-                        }.recoverCatching { cmErr ->
-                            DdLog.i(ctx, "search", "匿名 CM 失败，退回网页抓取：${cmErr.message}")
-                            WorkshopBrowseRepo.search(text, page, reqSort, days = reqDays)
-                                .let { WorkshopRepo.SubscriptionPage(it.items, it.total) }
-                        }.getOrThrow()
-                    }
+                    searchWorkshopOnce(account, key, text, page, reqSort, days = reqDays)
                 }
             }
             res.onSuccess { result ->
@@ -1174,33 +1369,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             DdLog.i(ctx, "search", "debug query=[$text] loggedIn=${account != null} hasKey=${key.isNotEmpty()}")
             val started = System.currentTimeMillis()
             runCatching {
-                when {
-                    account != null -> retryIo(times = 2) {
-                        WorkshopRepo.searchViaCm(
-                            account.toSession("DD Launcher"), text, 1, _ws.value.sort,
-                            queryTypeOverride = queryType,
-                        )
-                    }
-                    key.isNotEmpty() -> WorkshopRepo.queryFiles(key, text, 1, _ws.value.sort)
-                        .let { WorkshopRepo.SubscriptionPage(it, it.size) }
-                    else -> runCatching {
-                        retryIo(times = 2) {
-                            WorkshopRepo.searchAnonymousViaCm(text, 1, _ws.value.sort, queryTypeOverride = queryType)
-                        }
-                    }.recoverCatching {
-                        WorkshopBrowseRepo.search(text, 1, _ws.value.sort, days = 0)
-                            .let { WorkshopRepo.SubscriptionPage(it.items, it.total) }
-                    }.getOrThrow()
-                }
+                searchWorkshopOnce(
+                    account, key, text, 1, _ws.value.sort, queryTypeOverride = queryType,
+                )
             }.onSuccess { page ->
                 DdLog.i(ctx, "search", "OK ${System.currentTimeMillis() - started}ms items=${page.items.size} total=${page.total}")
                 page.items.take(5).forEach { DdLog.i(ctx, "search", "  ${it.id} ${it.title}") }
                 // 顺便验证翻页：再拉一页，看有没有重复/是不是真新内容
                 if (account != null && page.items.size >= 10) {
                     runCatching {
-                        retryIo(times = 2) {
-                            WorkshopRepo.searchViaCm(account.toSession("DD Launcher"), text, 2, _ws.value.sort)
-                        }
+                        searchWorkshopOnce(account, key, text, 2, _ws.value.sort)
                     }.onSuccess { p2 ->
                         val overlap = p2.items.map { it.id }.intersect(page.items.map { it.id }.toSet()).size
                         DdLog.i(
@@ -1692,6 +1870,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val raw: String = "",
         val modifiedAt: Long = 0L,
         val options: List<GameOptions.Option> = emptyList(),
+        val introSkipAvailable: Boolean = false,
+        val introSkipEnabled: Boolean = false,
+        val introSkipPath: String = "",
+        val font: GameFont.Status = GameFont.Status(),
+        val fontBusy: Boolean = false,
+        val fontMessage: String? = null,
         /** 读文件失败的说明（文件不存在 / 不是 JSON），只在界面上显示一次，不当弹窗 */
         val error: String? = null,
         /** 保存后的结果一句话，成功/失败都写在这儿 */
@@ -1708,6 +1892,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val ctx = getApplication<Application>()
             val loaded = withContext(Dispatchers.IO) { GameOptions.load(ctx) }
             val backups = withContext(Dispatchers.IO) { GameOptions.listBackups() }
+            val intro = withContext(Dispatchers.IO) { IntroSkip.status(ctx) }
+            val font = withContext(Dispatchers.IO) { GameFont.status(ctx) }
             _opts.update {
                 it.copy(
                     loading = false,
@@ -1715,6 +1901,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     raw = loaded.raw,
                     modifiedAt = loaded.modifiedAt,
                     options = loaded.options,
+                    introSkipAvailable = intro.available,
+                    introSkipEnabled = intro.enabled,
+                    introSkipPath = intro.path,
+                    font = font,
                     error = loaded.error,
                     backups = backups,
                 )
@@ -1723,6 +1913,43 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun optsMessage(msg: String?) = _opts.update { it.copy(message = msg) }
+
+    fun optsSetIntroSkip(enabled: Boolean) {
+        if (_opts.value.saving) return
+        viewModelScope.launch {
+            _opts.update { it.copy(saving = true, message = null) }
+            val ctx = getApplication<Application>()
+            val err = withContext(Dispatchers.IO) { IntroSkip.setEnabled(ctx, enabled) }
+            _opts.update { it.copy(saving = false) }
+            if (err == null) {
+                note(if (enabled) "已设置跳过开屏动画，下次启动游戏生效" else "已恢复开屏动画")
+                optsLoad()
+                _opts.update {
+                    it.copy(message = if (enabled) "开屏动画已跳过，下次启动游戏生效" else "开屏动画已恢复")
+                }
+            } else {
+                _opts.update { it.copy(message = err) }
+            }
+        }
+    }
+
+    fun optsSetFont(percent: Int) {
+        if (_opts.value.fontBusy) return
+        viewModelScope.launch {
+            _opts.update { it.copy(fontBusy = true, fontMessage = null) }
+            val ctx = getApplication<Application>()
+            val err = withContext(Dispatchers.IO) { GameFont.apply(ctx, percent) }
+            _opts.update { it.copy(fontBusy = false) }
+            if (err == null) {
+                val msg = if (percent == GameFont.NORMAL) "已恢复原版字体" else "字体大小已设为 $percent%，下次启动游戏生效"
+                note(msg)
+                optsLoad()
+                _opts.update { it.copy(fontMessage = msg) }
+            } else {
+                _opts.update { it.copy(fontMessage = err) }
+            }
+        }
+    }
 
     /** 保存若干键（值是界面上的文本，按原类型回转） */
     fun optsSave(edits: Map<String, String>) {
@@ -1800,15 +2027,91 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         note(launchGame().ifBlank { "正在启动游戏…" })
     }
 
+    /** 调试：把当前存档的 persist.game.json 拷到 files/，方便 adb 拉下来分析结构 */
+    fun dumpGameSave() {
+        val ctx = getApplication<Application>()
+        viewModelScope.launch {
+            val msg = withContext(Dispatchers.IO) {
+                runCatching {
+                    val src = java.io.File(Game.saveDir(), "profile_0/persist.game.json")
+                    require(src.isFile) { "没有 profile_0/persist.game.json" }
+                    val out = java.io.File(ctx.getExternalFilesDir(null), "persist.game.dump")
+                    src.copyTo(out, overwrite = true)
+                    "已导出 ${src.length()} 字节 -> ${out.absolutePath}"
+                }.getOrElse { "导出失败：${it.message}" }
+            }
+            DdLog.i(ctx, "save", msg)
+            note(msg)
+        }
+    }
+
+    /**
+     * 游戏跑在 `android:process=":nx"` 的独立进程里，启动器关掉它也不会退。
+     * 这里按进程名找到它并直接 kill（同一个 uid，系统允许）。
+     */
+    private fun gamePids(): List<Int> {
+        val ctx = getApplication<Application>()
+        val am = ctx.getSystemService(android.app.ActivityManager::class.java) ?: return emptyList()
+        val name = "${ctx.packageName}:nx"
+        return am.runningAppProcesses.orEmpty()
+            .filter { it.processName == name && it.pid > 0 }
+            .map { it.pid }
+    }
+
+    fun gameProcessAlive(): Boolean = gamePids().isNotEmpty()
+
+    /** 结束游戏进程；没在跑就只提示一下 */
+    fun killGame() {
+        val ctx = getApplication<Application>()
+        val pids = gamePids()
+        if (pids.isEmpty()) {
+            note("游戏没在运行")
+            return
+        }
+        pids.forEach { pid ->
+            if (pid == android.os.Process.myPid()) return@forEach
+            runCatching { android.os.Process.killProcess(pid) }
+        }
+        DdLog.i(ctx, "game", "kill :nx pid=$pids")
+        note("已结束游戏进程，下次启动会重新读存档和排序")
+    }
+
     fun launchGame(): String {
         if (!_state.value.packInstalled) return "还没导入数据包，先点上面那张卡片"
         val ctx = getApplication<Application>()
+        runCatching { IntroSkip.applySavedPreference(ctx) }
+            .onSuccess { err -> if (err != null) DdLog.i(ctx, "introskip", err) }
+            .onFailure { DdLog.e(ctx, "introskip", it) }
+        // 游戏里的 mod 优先级是每个存档各一份，启动前把启动器里的顺序写进去
+        runCatching {
+            // 用磁盘上的 project.xml / project.xml.off 重新扫一遍，避免刚切开关就点启动时用到旧状态
+            val ordered = runBlocking(Dispatchers.IO) {
+                val mods = repo.scan()
+                groupStore.also { it.invalidate() }.snapshot().loadOrderOf(mods)
+            }
+            if (ordered.isEmpty()) return@runCatching
+            val r = runBlocking(Dispatchers.IO) { ModOrderSync.sync(ordered) }
+            DdLog.i(ctx, "modorder", r.summary)
+            r.notes.forEach { DdLog.i(ctx, "modorder", it) }
+            if (r.skipped.isNotEmpty()) DdLog.i(ctx, "modorder", "跳过 ${r.skipped.size} 个存档")
+            DdLog.i(
+                ctx, "modorder",
+                ordered.filter { it.enabled }
+                    .joinToString(" > ") { it.title.trim().ifBlank { it.dir.name } },
+            )
+        }.onFailure { DdLog.e(ctx, "modorder", it) }
         val intent = Intent().apply {
             component = ComponentName(ctx.packageName, Game.LAUNCH_ACTIVITY)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return try {
             ctx.startActivity(intent)
+            // 游戏里没有退出入口，叠一个悬浮「退出」钮（没授权就不显示）
+            if (ExitOverlay.canDraw(ctx)) {
+                ExitOverlay.start(ctx)
+            } else {
+                DdLog.i(ctx, "game", "overlay not granted, skip exit bubble")
+            }
             // 顺手在后台留一份存档快照（6 小时内已备份过就跳过），mod 把存档搞坏时能退回去
             viewModelScope.launch(Dispatchers.IO) {
                 runCatching {
@@ -1821,7 +2124,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }.onFailure { DdLog.e(getApplication(), "save", it) }
             }
-            ""
+            if (ExitOverlay.canDraw(ctx)) "" else
+                "已启动游戏 · 想要游戏内退出钮，先给启动器「显示在其他应用上层」权限"
         } catch (t: Throwable) {
             "启动失败：${t.message ?: t.javaClass.simpleName}"
         }

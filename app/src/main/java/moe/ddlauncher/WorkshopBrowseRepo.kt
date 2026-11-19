@@ -2,8 +2,10 @@ package moe.ddlauncher
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -23,18 +25,29 @@ object WorkshopBrowseRepo {
     private const val BASE = "https://steamcommunity.com/"
     private const val DETAILS = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 
-    private const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
-    private const val ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    // 和上游 STEAM_WEB_BROWSER_USER_AGENT 一字不差：Steam 会按 UA 区分页面形态，
+    // 老 UA 容易被边缘节点当成爬虫直接 403。
+    private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+    private const val ACCEPT =
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
 
-    /** 网页抓取专用客户端：短超时 + 失败重试，避免国内网络下一个黑洞 IP 卡死 */
+    /**
+     * 网页抓取专用客户端，参数照搬上游 `createWorkshopBrowseDetailClient()`：
+     * 5/8/8/8 秒短超时 + 强制 HTTP/1.1 + **禁用连接复用**。
+     *
+     * 最后一点是关键：国内网络里一条被中间设备悄悄掐死的 keep-alive 连接会被 OkHttp
+     * 继续拿去复用，表现就是「第一次能打开、刷新一下就一直 timeout」。每次新建连接反而稳。
+     */
     private val client: OkHttpClient by lazy {
         WattAccelerator.decorate(
             OkHttpClient.Builder()
-                .connectTimeout(6, TimeUnit.SECONDS)
-                .readTimeout(15, TimeUnit.SECONDS)
-                .writeTimeout(15, TimeUnit.SECONDS)
-                .callTimeout(30, TimeUnit.SECONDS)
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(8, TimeUnit.SECONDS)
+                .writeTimeout(8, TimeUnit.SECONDS)
+                .callTimeout(8, TimeUnit.SECONDS)
+                .protocols(listOf(Protocol.HTTP_1_1))
+                .connectionPool(ConnectionPool(0, 1, TimeUnit.MILLISECONDS))
                 .retryOnConnectionFailure(true)
                 .followRedirects(true)
                 .followSslRedirects(true)

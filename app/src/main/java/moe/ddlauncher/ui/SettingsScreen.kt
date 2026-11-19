@@ -66,6 +66,8 @@ fun SettingsScreen(
     onLoadLauncherLog: () -> Unit,
     onLoadGameLog: () -> Unit,
     onClearLogs: () -> Unit,
+    onCheckLauncherUpdate: () -> Unit,
+    onDownloadLauncherUpdate: () -> Unit,
 ) {
     val ctx = LocalContext.current
     var showHelp by remember { mutableStateOf(false) }
@@ -262,6 +264,78 @@ fun SettingsScreen(
                             )
                         }
                         TextButton(onClick = { showHelp = true }) { Text("打开") }
+                    }
+                }
+            }
+
+            item { SectionLabel("启动器更新") }
+            item {
+                Card {
+                    val update = state.launcherUpdate
+                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        Text("检查启动器自身更新", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "从 GitHub Releases 获取最新版；下载完成后交给系统安装器覆盖安装。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            OutlinedButton(
+                                onClick = onCheckLauncherUpdate,
+                                enabled = !update.busy,
+                            ) {
+                                Text(if (update.checking) "检查中…" else "检查更新")
+                            }
+                            if (update.release != null) {
+                                Button(
+                                    onClick = onDownloadLauncherUpdate,
+                                    enabled = !update.busy,
+                                ) {
+                                    Text(
+                                        when {
+                                            update.readyPath != null -> "安装更新"
+                                            update.downloading -> "下载中…"
+                                            else -> "下载并安装"
+                                        }
+                                    )
+                                }
+                            }
+                            TextButton(
+                                onClick = {
+                                    openLink(
+                                        ctx,
+                                        update.release?.pageUrl?.takeIf { it.isNotBlank() }
+                                            ?: "${About.REPO}/releases",
+                                    )
+                                },
+                            ) {
+                                Text("发布页")
+                            }
+                        }
+                        update.release?.let { release ->
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "最新版 ${release.version} · ${release.apkName}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        update.message?.let { message ->
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                message,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (update.isError) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
                     }
                 }
             }

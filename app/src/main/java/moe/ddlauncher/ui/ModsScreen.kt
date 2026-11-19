@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -106,11 +108,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import moe.ddlauncher.AppViewModel
 import moe.ddlauncher.Conflict
 import moe.ddlauncher.DataPack
 import moe.ddlauncher.Game
 import moe.ddlauncher.ModGroup
+import moe.ddlauncher.ModAliases
 import moe.ddlauncher.ModGroups
 import moe.ddlauncher.ModInfo
 import moe.ddlauncher.R
@@ -129,7 +134,11 @@ fun ModsApp(
     onGrant: () -> Unit,
     onRefresh: () -> Unit,
     onLaunch: () -> Unit,
+    onKillGame: () -> Unit,
+    onOverlayPermission: () -> Unit,
+    onSetLoadOrder: (List<String>) -> Unit,
     onToggle: (ModInfo, Boolean) -> Unit,
+    onRenameMod: (String, String) -> Boolean,
     onDelete: (ModInfo) -> Unit,
     onImport: (List<Uri>) -> Unit,
     onImportPack: (Uri) -> Unit,
@@ -164,6 +173,7 @@ fun ModsApp(
     var showLog by remember { mutableStateOf(false) }
     var confirmRemovePack by remember { mutableStateOf(false) }
     var pendingExportId by remember { mutableStateOf<String?>(null) }
+    var showLoadOrder by remember { mutableStateOf(false) }
 
     // 游戏版本以导入的数据包为准（从包里的清单读出来的），不再用 APK 的 versionName 冒充
     val launcherVer = state.versionName.ifBlank { "启动器" }
@@ -310,6 +320,8 @@ fun ModsApp(
                     packSize = state.packSize,
                     version = gameVer,
                     onLaunch = onLaunch,
+                    onKillGame = onKillGame,
+                    onOverlayPermission = onOverlayPermission,
                     onRemove = { confirmRemovePack = true },
                 )
             }
@@ -320,6 +332,7 @@ fun ModsApp(
                     conflicts = state.conflicts,
                     onShowConflicts = { showConflicts = true },
                     onToggleAll = onToggleAllMods,
+                    onOpenLoadOrder = { showLoadOrder = true },
                 )
             }
 
@@ -407,6 +420,7 @@ fun ModsApp(
             onMoveToGroup = { gid -> onMoveModsToGroup(listOf(detailMod.id), gid) },
             onDismiss = { detailId = null },
             onToggle = { onToggle(detailMod, it) },
+            onRename = { name -> onRenameMod(detailMod.id, name) },
             onDelete = {
                 detailId = null
                 onDelete(detailMod)
@@ -430,6 +444,19 @@ fun ModsApp(
 
     if (showConflicts) {
         ConflictsDialog(state.conflicts) { showConflicts = false }
+    }
+
+    if (showLoadOrder) {
+        LoadOrderDialog(
+            mods = state.groups.loadOrderOf(state.mods).filter { it.enabled },
+            onSetOrder = onSetLoadOrder,
+            onReset = {
+                onSetLoadOrder(
+                    state.sections.flatMap { it.mods }.filter { it.enabled }.map { it.id }
+                )
+            },
+            onDismiss = { showLoadOrder = false },
+        )
     }
 
     if (showSaves) {
@@ -543,6 +570,8 @@ private fun GameCard(
     packSize: Long,
     version: String,
     onLaunch: () -> Unit,
+    onKillGame: () -> Unit,
+    onOverlayPermission: () -> Unit,
     onRemove: () -> Unit,
 ) {
     Column(
@@ -623,8 +652,26 @@ private fun GameCard(
                     color = HeroSub.copy(alpha = 0.75f),
                     modifier = Modifier.weight(1f),
                 )
+                TextButton(onClick = onKillGame) {
+                    Text("结束游戏", fontSize = 12.sp, color = HeroSub.copy(alpha = 0.85f))
+                }
                 TextButton(onClick = onRemove) {
                     Text("删除数据包", fontSize = 12.sp, color = HeroSub.copy(alpha = 0.85f))
+                }
+            }
+
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "游戏里没有退出入口？开个悬浮退出钮",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HeroSub.copy(alpha = 0.7f),
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onOverlayPermission) {
+                    Text("开启", fontSize = 12.sp, color = HeroSub.copy(alpha = 0.85f))
                 }
             }
         }
@@ -686,12 +733,196 @@ private fun openDataPackDownload(ctx: android.content.Context) {
     }
 }
 
+/**
+ * 单独的加载顺序：和分组列表无关，这里排出来的顺序就是写进存档的优先级。
+ * 最上面 = 优先级最高（最后加载、能覆盖下面的）。
+ */
+@Composable
+private fun LoadOrderDialog(
+    mods: List<ModInfo>,
+    onSetOrder: (List<String>) -> Unit,
+    onReset: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    var draggingId by remember { mutableStateOf<String?>(null) }
+    val latestOrder = rememberUpdatedState(mods.map { it.id })
+    val latestSet = rememberUpdatedState(onSetOrder)
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("MOD 加载顺序", style = MaterialTheme.typography.titleLarge)
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "最上面 = 优先级最高（最后加载、覆盖下面的）。这个顺序和分组列表无关，" +
+                                "启动游戏时会写进存档。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = onDismiss) { Text("完成") }
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "已启用 ${mods.size} 个 · 长按拖动或点箭头",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onReset) { Text("按列表顺序重置") }
+                }
+                HorizontalDivider()
+                if (mods.isEmpty()) {
+                    Text(
+                        "没有启用的 mod",
+                        modifier = Modifier.padding(vertical = 24.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
+                        itemsIndexed(mods, key = { _, m -> "load:${m.id}" }) { index, mod ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(
+                                        if (draggingId == mod.id) {
+                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                        } else {
+                                            Color.Transparent
+                                        }
+                                    )
+                                    .loadOrderDrag(
+                                        modId = mod.id,
+                                        listState = listState,
+                                        scope = scope,
+                                        order = { latestOrder.value },
+                                        onReorder = { latestSet.value(it) },
+                                        onDragState = { on ->
+                                            draggingId = if (on) mod.id else null
+                                        },
+                                    )
+                                    .padding(start = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "${index + 1}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.width(26.dp),
+                                )
+                                Icon(
+                                    Icons.Filled.Menu,
+                                    contentDescription = "长按拖动",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    mod.displayName,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                IconButton(
+                                    onClick = {
+                                        val ids = mods.map { it.id }.toMutableList()
+                                        if (index > 0) {
+                                            ids.add(index - 1, ids.removeAt(index))
+                                            onSetOrder(ids)
+                                        }
+                                    },
+                                    enabled = index > 0,
+                                ) { Icon(Icons.Filled.KeyboardArrowUp, "上移") }
+                                IconButton(
+                                    onClick = {
+                                        val ids = mods.map { it.id }.toMutableList()
+                                        if (index < ids.lastIndex) {
+                                            ids.add(index + 1, ids.removeAt(index))
+                                            onSetOrder(ids)
+                                        }
+                                    },
+                                    enabled = index < mods.lastIndex,
+                                ) { Icon(Icons.Filled.KeyboardArrowDown, "下移") }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 平铺列表的长按拖动排序；和分组列表那套互不影响 */
+private fun Modifier.loadOrderDrag(
+    modId: String,
+    listState: LazyListState,
+    scope: CoroutineScope,
+    order: () -> List<String>,
+    onReorder: (List<String>) -> Unit,
+    onDragState: (Boolean) -> Unit,
+): Modifier = this.pointerInput(modId) {
+    var pointerY = 0f
+    var moved = 0f
+    detectDragGesturesAfterLongPress(
+        onDragStart = { offset ->
+            val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == "load:$modId" }
+            pointerY = (info?.offset ?: 0) + offset.y
+            moved = 0f
+            onDragState(true)
+        },
+        onDragEnd = { onDragState(false) },
+        onDragCancel = { onDragState(false) },
+        onDrag = { change, amount ->
+            change.consume()
+            moved += kotlin.math.abs(amount.x) + kotlin.math.abs(amount.y)
+            pointerY += amount.y
+            if (moved >= 16f) {
+                val info = listState.layoutInfo
+                val edge = 96f
+                when {
+                    pointerY < info.viewportStartOffset + edge ->
+                        scope.launch { listState.scrollBy(-14f) }
+
+                    pointerY > info.viewportEndOffset - edge ->
+                        scope.launch { listState.scrollBy(14f) }
+                }
+                val hovered = (info.visibleItemsInfo
+                    .firstOrNull { pointerY >= it.offset && pointerY <= it.offset + it.size }
+                    ?.key as? String)
+                    ?.takeIf { it.startsWith("load:") }
+                    ?.removePrefix("load:")
+                if (hovered != null && hovered != modId) {
+                    val ids = order().toMutableList()
+                    val from = ids.indexOf(modId)
+                    val to = ids.indexOf(hovered)
+                    if (from >= 0 && to >= 0) {
+                        ids.add(to, ids.removeAt(from))
+                        onReorder(ids)
+                    }
+                }
+            }
+        },
+    )
+}
+
 @Composable
 private fun SummaryRow(
     mods: List<ModInfo>,
     conflicts: List<Conflict>,
     onShowConflicts: () -> Unit,
     onToggleAll: (Boolean) -> Unit,
+    onOpenLoadOrder: () -> Unit,
 ) {
     val enabled = mods.count { it.enabled }
     val allOn = mods.isNotEmpty() && enabled == mods.size
@@ -721,6 +952,12 @@ private fun SummaryRow(
             )
             Spacer(Modifier.weight(1f))
             if (mods.isNotEmpty()) {
+                TextButton(
+                    onClick = onOpenLoadOrder,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text("MOD 排序", style = MaterialTheme.typography.labelMedium)
+                }
                 TextButton(
                     onClick = { onToggleAll(!allOn) },
                     contentPadding = PaddingValues(horizontal = 8.dp),
@@ -981,10 +1218,12 @@ private fun ModSheet(
     onMoveToGroup: (String?) -> Unit,
     onDismiss: () -> Unit,
     onToggle: (Boolean) -> Unit,
+    onRename: (String) -> Boolean,
     onDelete: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var confirmDelete by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
@@ -999,6 +1238,13 @@ private fun ModSheet(
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     Text(mod.displayName, style = MaterialTheme.typography.titleLarge)
+                    if (mod.hasCustomName) {
+                        Text(
+                            "原名：${mod.originalName}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     Text(
                         buildString {
                             if (mod.version.isNotBlank()) append("v${mod.version}")
@@ -1021,6 +1267,15 @@ private fun ModSheet(
                 groups = groups,
                 onPick = onMoveToGroup,
             )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = { renaming = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.Edit, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(7.dp))
+                Text(if (mod.hasCustomName) "修改自定义名称" else "自定义名称")
+            }
 
             if (mod.tags.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
@@ -1113,6 +1368,65 @@ private fun ModSheet(
             },
         )
     }
+
+    if (renaming) {
+        RenameModDialog(
+            mod = mod,
+            onDismiss = { renaming = false },
+            onSave = { name ->
+                if (onRename(name)) renaming = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun RenameModDialog(
+    mod: ModInfo,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var name by remember(mod.id, mod.customName, mod.originalName) {
+        mutableStateOf(mod.customName.ifBlank { mod.originalName })
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自定义 mod 名称") },
+        text = {
+            Column {
+                Text(
+                    "只改启动器列表里显示的名字，不改文件夹、project.xml 或游戏内名称。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(ModAliases.MAX_LENGTH) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("显示名称") },
+                    supportingText = {
+                        Text("留空保存会恢复原名：${mod.originalName}")
+                    },
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(name) }) { Text("保存") }
+        },
+        dismissButton = {
+            Row {
+                if (mod.hasCustomName) {
+                    TextButton(onClick = { onSave("") }) {
+                        Text("恢复原名", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
+    )
 }
 
 @Composable

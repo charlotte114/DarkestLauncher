@@ -70,6 +70,8 @@ class MainActivity : ComponentActivity() {
                         onSaveRaw = { vm.optsSaveRaw(it) },
                         onRestoreLatest = { vm.optsRestoreLatest() },
                         onDump = { vm.optsDump() },
+                        onSetIntroSkip = { vm.optsSetIntroSkip(it) },
+                        onSetFont = { vm.optsSetFont(it) },
                     )
                 } else if (showSettings) {
                     BackHandler { showSettings = false }
@@ -88,6 +90,8 @@ class MainActivity : ComponentActivity() {
                         onLoadLauncherLog = { vm.loadLauncherLog() },
                         onLoadGameLog = { vm.loadGameLog() },
                         onClearLogs = { vm.clearLauncherLog() },
+                        onCheckLauncherUpdate = { vm.checkLauncherUpdate() },
+                        onDownloadLauncherUpdate = { vm.downloadLauncherUpdate() },
                     )
                 } else if (showWorkshop) {
                     // 系统返回键：详情 -> 列表 -> 主界面，而不是直接退出 App
@@ -148,7 +152,11 @@ class MainActivity : ComponentActivity() {
                         onGrant = { askForAccess() },
                         onRefresh = { vm.refresh() },
                         onLaunch = { vm.launch() },
+                        onKillGame = { vm.killGame() },
+                        onOverlayPermission = { askForOverlay() },
+                        onSetLoadOrder = { vm.setLoadOrder(it) },
                         onToggle = { mod, on -> vm.toggle(mod, on) },
+                        onRenameMod = { id, name -> vm.renameMod(id, name) },
                         onDelete = { vm.delete(it) },
                         onImport = { vm.importZips(it) },
                         onImportPack = { uri -> vm.importDataPack(uri) },
@@ -210,6 +218,8 @@ class MainActivity : ComponentActivity() {
      * adb shell am start -n com.darkestdungeon.launcher/moe.ddlauncher.MainActivity -e checkupdates 1
      * adb shell am start -n com.darkestdungeon.launcher/moe.ddlauncher.MainActivity -e dumpopts 1
      * adb shell am start -n com.darkestdungeon.launcher/moe.ddlauncher.MainActivity -e optset music_volume=35
+     * adb shell am start -n com.darkestdungeon.launcher/moe.ddlauncher.MainActivity -e fontpct 110
+     * adb shell am start -n com.darkestdungeon.launcher/moe.ddlauncher.MainActivity -e launchercheck 1
      * ```
      *
      * 日志都落在 /sdcard/Android/data/com.darkestdungeon.launcher/files/ddlauncher.log。
@@ -224,10 +234,16 @@ class MainActivity : ComponentActivity() {
         val wsq = intent?.getStringExtra("wsq")
         val wsqt = intent?.getStringExtra("wsqt")?.trim()?.toIntOrNull()
         val dumpOpts = intent?.getStringExtra("dumpopts") != null
+        val skipIntro = intent?.getStringExtra("skipintro")?.trim()?.toBooleanStrictOrNull()
+        val fontPct = intent?.getStringExtra("fontpct")?.trim()?.toIntOrNull()
+        val launcherCheck = intent?.getStringExtra("launchercheck") != null
+        val launchGame = intent?.getStringExtra("launchgame") != null
+        val dumpSave = intent?.getStringExtra("dumpsave") != null
         // -e optset music_volume=35 ：改一个游戏设置键（值按原类型回转）
         val optSet = intent?.getStringExtra("optset")?.trim()?.takeIf { it.contains('=') }
         if (dl == null && !check && !backup && restore == null && selftest == null && !selfcheck &&
-            wsq == null && !dumpOpts && optSet == null
+            wsq == null && !dumpOpts && optSet == null && skipIntro == null && !launchGame &&
+            !dumpSave && fontPct == null && !launcherCheck
         ) return
         DdLog.i(this, "adb", "intent dl=$dl checkupdates=$check backup=$backup restore=$restore selftest=$selftest")
         // 等 ViewModel 起来再动手，不然沙盒还没准备好
@@ -239,6 +255,11 @@ class MainActivity : ComponentActivity() {
                 restore != null -> vm.restoreSave(restore)
                 selftest != null -> vm.saveSelfTest()
                 dumpOpts -> vm.optsDump()
+                skipIntro != null -> vm.optsSetIntroSkip(skipIntro)
+                fontPct != null -> vm.optsSetFont(fontPct)
+                launcherCheck -> vm.checkLauncherUpdate()
+                launchGame -> vm.launch()
+                dumpSave -> vm.dumpGameSave()
                 optSet != null -> vm.optsSave(
                     mapOf(optSet.substringBefore('=') to optSet.substringAfter('='))
                 )
@@ -283,6 +304,29 @@ class MainActivity : ComponentActivity() {
                 arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE),
                 REQ_STORAGE,
             )
+        }
+    }
+
+    /** 「显示在其他应用上层」：游戏内悬浮退出钮要用 */
+    private fun askForOverlay() {
+        if (ExitOverlay.canDraw(this)) {
+            android.widget.Toast.makeText(
+                this,
+                "已授权：启动游戏后右上角会出现「退出」钮",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+        val specific = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName"),
+        )
+        val ok = runCatching {
+            startActivity(specific)
+            true
+        }.getOrDefault(false)
+        if (!ok) {
+            runCatching { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)) }
         }
     }
 
